@@ -1,0 +1,66 @@
+# Evidential Deep Learning (EDL) Configuration
+# Based on Sensoy et al. (2018)
+
+# Model architecture
+model:
+  backbone:
+    use_3d: true
+    arch_3d: 'resnet3d_18'
+    pretrained: false
+    in_channels: 1
+  
+  classifier:
+    dropout: 0.5
+    num_classes: 2
+
+# Evidential specific settings
+evidential:
+  kl_weight: 0.1           # Regularization weight
+  kl_anneal_start: 0       # Epoch to start annealing
+  kl_anneal_end: 10        # Epoch to reach max weight
+  uncertainty_type: 'epistemic' # For rejection during evaluation
+
+# Training hyperparameters
+training:
+  epochs: 50
+  batch_size: 4
+  learning_rate: 0.00005
+  weight_decay: 0.0001
+  
+  # Optimizer (EDL often benefits from slightly lower LR)
+  optimizer: 'adam'
+  
+  # Learning rate scheduler
+  scheduler:
+    type: 'reduce_on_plateau'
+    patience: 5
+    factor: 0.5
+    min_lr: 0.000001
+  
+  # Early stopping
+  early_stopping:
+    enabled: true
+    patience: 10
+    metric: 'val_loss'
+    mode: 'min'
+
+# Data paths
+data:
+  metadata_csv: 'data_metadata_adni.csv'
+  
+# Checkpointing
+checkpoint:
+  dir: 'checkpoints/evidential'
+  save_best_only: true
+  monitor: 'val_loss'
+  mode: 'min'
+
+# Logging
+logging:
+  tensorboard_dir: 'runs/evidential'
+  log_interval: 10
+  save_predictions: true
+
+# Device
+device: 'cuda'
+seed: 42

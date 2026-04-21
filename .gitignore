@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Data and Models
+Alzheimer_MRI_4_classes_dataset/
+ADNI/
+ADNI_*/
+*adni*/
+*.dcm
+*.nii
+*.nii.gz
+checkpoints/
+*.pth
+*.ckpt
+*.h5
+
+# Logs and Results
+logs/
+tensorboard_logs/
+runs/
+results/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+*.Zone.Identifier
+
+# Temporary
+tmp/
+temp/
+*.tmp

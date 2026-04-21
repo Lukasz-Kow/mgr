@@ -1,0 +1,66 @@
+# SelectiveNet Configuration
+# Based on Geifman & El-Yaniv (2019)
+
+# Model architecture
+model:
+  backbone:
+    use_3d: true
+    arch_3d: 'resnet3d_18'
+    pretrained: false
+    in_channels: 1
+  
+  classifier:
+    dropout: 0.5
+    selection_dropout: 0.3
+    num_classes: 2
+
+# SelectiveNet specific settings
+selective_net:
+  target_coverage: 0.8     # The percentage of samples we want to classify
+  aux_weight: 0.3          # Weight for auxiliary head loss
+  coverage_penalty: 10.0   # Penalty for deviating from target coverage
+
+# Training hyperparameters
+training:
+  epochs: 50
+  batch_size: 4            # 3D volumes require small batch size
+  learning_rate: 0.00005
+  weight_decay: 0.0001
+  
+  # Optimizer
+  optimizer: 'adam'
+  
+  # Learning rate scheduler
+  scheduler:
+    type: 'reduce_on_plateau'
+    patience: 5
+    factor: 0.5
+    min_lr: 0.000001
+  
+  # Early stopping
+  early_stopping:
+    enabled: true
+    patience: 10
+    metric: 'val_loss'
+    mode: 'min'
+
+# Data paths
+data:
+  metadata_csv: 'data_metadata_adni.csv'
+  
+# Checkpointing
+checkpoint:
+  dir: 'checkpoints/selective_net'
+  save_best_only: true
+  monitor: 'val_loss'
+  mode: 'min'
+
+# Logging
+logging:
+  tensorboard_dir: 'runs/selective_net'
+  log_interval: 10
+  save_predictions: true
+
+# Device
+device: 'cuda'
+seed: 42

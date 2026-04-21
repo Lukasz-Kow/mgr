@@ -1,0 +1,65 @@
+# Hybrid 3D-ResNet-EDL Configuration
+# COMBINES ResNet Backbone + Evidential Head
+
+# Model architecture
+model:
+  backbone:
+    use_3d: true
+    arch_3d: 'resnet3d_18'
+    pretrained: false
+    in_channels: 1
+  
+  classifier:
+    dropout: 0.5
+    num_classes: 2
+
+# Hybrid specific settings (EDL-based)
+evidential:
+  kl_weight: 0.2           # Slightly higher KL for the hybrid model
+  kl_anneal_start: 0
+  kl_anneal_end: 10
+  uncertainty_type: 'epistemic'
+
+# Training hyperparameters
+training:
+  epochs: 60               # Hybrids might need more time
+  batch_size: 4
+  learning_rate: 0.00005
+  weight_decay: 0.0005     # Slightly more weight decay for regularization
+  
+  # Optimizer
+  optimizer: 'adamw'       # AdamW for better weight decay handling
+  
+  # Learning rate scheduler
+  scheduler:
+    type: 'cosine'         # Cosine annealing for fine-tuning
+    t_max: 60
+    min_lr: 0.000001
+  
+  # Early stopping
+  early_stopping:
+    enabled: true
+    patience: 15
+    metric: 'val_loss'
+    mode: 'min'
+
+# Data paths
+data:
+  metadata_csv: 'data_metadata_adni.csv'
+  
+# Checkpointing
+checkpoint:
+  dir: 'checkpoints/hybrid'
+  save_best_only: true
+  monitor: 'val_loss'
+  mode: 'min'
+
+# Logging
+logging:
+  tensorboard_dir: 'runs/hybrid'
+  log_interval: 10
+  save_predictions: true
+
+# Device
+device: 'cuda'
+seed: 42

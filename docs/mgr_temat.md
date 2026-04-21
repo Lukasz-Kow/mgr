@@ -1,0 +1,22 @@
+Temat PL: Zastosowanie selektywnej predykcji w głębokich sieciach 3D-CNN do redukcji fałszywych alarmów w diagnostyce łagodnych zaburzeń poznawczych na podstawie obrazów MRI.
+Temat EN: Application of selective prediction in deep 3D-CNN networks for false alarm reduction in mild cognitive impairment diagnosis based on MRI images.
+
+Zakres pracy:
+1.	Przegląd literatury i analiza stanu wiedzy, analiza obecnych rozwiązań w klasyfikacji MCI vs CN.
+2.	Analiza i przygotowanie danych obrazowych, ekstrakcja i preprocessing podzbioru danych z bazy ADNI. Proces obejmujący reorientację do przestrzeni MNI, usuwanie czaszki oraz normalizację intensywności.
+3.	Implementacja sieci bazowej, opracowanie i wytrenowanie modelu 3D-CNN jako punktu odniesienia dla binarnej klasyfikacji MCI vs CN.
+4.	Wdrożenie podstawowych mechanizmów selektywnej predykcji, implementacja metody Softmax Response oraz reimplementacja architektury SelectiveNet dla danych wolumetrycznych jako punktów odniesienia dla mechanizmu abstencji.
+5.	Zastosowanie uczenia ewidencyjnego, implementacja głowicy ewidencyjnej modelującej parametry rozkładu Dirichleta w celu kwantyfikacji niepewności epistemicznej modelu. 
+6.	Opracowanie modelu hybrydowego 3D-ResNet-EDL, integracja najlepszej architektury bazowej z mechanizmem EDL w celu stworzenia systemu potrafiącego odmówić diagnozy w przypadkach niejednoznacznych.
+7.	Ewaluacja i walidacja wyników, ocena modeli z wykorzystaniem metryk specyficznych dla selektywnej predykcji, krzywych Risk-Coverage, współczynnika Coverage oraz AUGRC.
+8.	Analiza klinicznej użyteczności modelu, porównanie czułości modeli przy wymuszonej, wysokiej specyficzności w celu wykazania skuteczności redukcji fałszywych alarmów.
+SMART
+•	Specific: Praca skupia się na bardzo wąskim i istotnym problemie klinicznym: redukcji błędów typu False Positive (zdrowi klasyfikowani jako MCI) przy użyciu konkretnych technologii (3D-CNN, Evidential Learning) na konkretnym zbiorze danych (ADNI).
+•	Measurable: Skuteczność modelu zostanie zmierzona precyzyjnymi metrykami matematycznymi: AUGRC, % Coverage oraz Sensitivity przy ustalonym progu Specificity.
+•	Achievable: Projekt bazuje na dostępnych publicznie bibliotekach, istniejących architekturach (ResNet) oraz zweryfikowanym zbiorze danych. 
+•	Relevant: Problem "overdiagnosis" w MCI jest realnym wyzwaniem medycznym. System, który potrafi powiedzieć "nie wiem" zamiast podać błędną diagnozę, ma wyższą wartość kliniczną niż standardowy klasyfikator.
+•	Time-bound: Realizacja etapów jest rozłożona na 6 miesięcy:
+o	II-III 2026: Preprocessing danych i trenowanie modelu Baseline (3D-CNN).
+o	IV-V 2026: Implementacja SelectiveNet oraz Evidential Deep Learning.
+o	V 2026: Budowa hybrydy, testy porównawcze i generowanie krzywych Risk-Coverage.
+o	VI-VII2026: Finalizacja tekstu pracy i analiza wniosków.
