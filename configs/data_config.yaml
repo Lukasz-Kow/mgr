@@ -12,6 +12,8 @@ augmentation:
   rotation_range: 10.0  # degrees
   random_brightness: 0.1  # +/- 10%
   random_contrast: 0.1   # +/- 10%
+  elastic_deformation: true   # TorchIO elastic deformation (anatomical variability)
+  bias_field: true             # TorchIO bias field (MRI scanner artifacts)
 
 # Dataset splits
 splits:

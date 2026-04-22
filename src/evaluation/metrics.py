@@ -105,7 +105,8 @@ def compute_augrc(
     risks_sorted = risks[sorted_indices]
     
     # Integrate using trapezoidal rule
-    augrc = np.trapz(risks_sorted, coverages_sorted)
+    # np.trapz may return negative if coverages are descending, take abs
+    augrc = abs(np.trapz(risks_sorted, coverages_sorted))
     
     return augrc
 
@@ -146,6 +147,104 @@ def compute_sensitivity_at_specificity(
     actual_specificity = specificity[idx]
     
     return sensitivity, threshold, actual_specificity
+
+
+def compute_sensitivity_at_multiple_specificities(
+    labels: np.ndarray,
+    probabilities: np.ndarray,
+    target_specificities: List[float] = [0.80, 0.90, 0.95],
+    positive_class: int = 1
+) -> Dict[str, Dict[str, float]]:
+    """
+    Compute sensitivity at multiple specificity thresholds.
+    
+    Critical for medical diagnosis: shows trade-off between detecting
+    MCI patients (sensitivity) and avoiding false alarms (specificity).
+    
+    Args:
+        labels: Ground truth labels
+        probabilities: Predicted probabilities for positive class
+        target_specificities: List of desired specificity levels
+        positive_class: Which class is positive (MCI=1)
+        
+    Returns:
+        Dict mapping specificity level to {sensitivity, threshold, actual_specificity}
+    """
+    results = {}
+    for spec in target_specificities:
+        sens, thresh, actual_spec = compute_sensitivity_at_specificity(
+            labels, probabilities, target_specificity=spec,
+            positive_class=positive_class
+        )
+        key = f"sens_at_{int(spec*100)}spec"
+        results[key] = {
+            'sensitivity': sens,
+            'threshold': thresh,
+            'actual_specificity': actual_spec
+        }
+    return results
+
+
+def compute_fp_reduction_at_abstention(
+    predictions: np.ndarray,
+    labels: np.ndarray,
+    confidences: np.ndarray,
+    abstention_levels: List[float] = [0.10, 0.20, 0.30]
+) -> Dict[str, Dict[str, float]]:
+    """
+    Compute False Positive reduction rate when rejecting uncertain samples.
+    
+    Key question: "If we let the model abstain on the 20% most uncertain
+    samples, how many False Positives do we eliminate?"
+    
+    This directly measures the clinical value of uncertainty estimation:
+    fewer FP = fewer healthy patients subjected to unnecessary procedures.
+    
+    Args:
+        predictions: Predicted classes
+        labels: Ground truth labels
+        confidences: Confidence scores (higher = more confident)
+        abstention_levels: Fraction of samples to reject (sorted by uncertainty)
+        
+    Returns:
+        Dict mapping abstention level to {fp_before, fp_after, fp_reduction_rate,
+        accuracy_after, coverage}
+    """
+    n = len(predictions)
+    
+    # Baseline FP count (no abstention)
+    fp_baseline = np.sum((predictions == 1) & (labels == 0))
+    
+    results = {}
+    for level in abstention_levels:
+        # Sort by confidence (ascending = least confident first)
+        sorted_idx = np.argsort(confidences)
+        n_reject = int(n * level)
+        
+        # Keep only the most confident samples
+        keep_idx = sorted_idx[n_reject:]
+        
+        if len(keep_idx) == 0:
+            continue
+        
+        preds_kept = predictions[keep_idx]
+        labels_kept = labels[keep_idx]
+        
+        fp_after = np.sum((preds_kept == 1) & (labels_kept == 0))
+        accuracy_after = np.mean(preds_kept == labels_kept)
+        
+        fp_reduction = (fp_baseline - fp_after) / max(fp_baseline, 1)
+        
+        key = f"abstention_{int(level*100)}pct"
+        results[key] = {
+            'fp_before': int(fp_baseline),
+            'fp_after': int(fp_after),
+            'fp_reduction_rate': float(fp_reduction),
+            'accuracy_after': float(accuracy_after),
+            'coverage': float(1.0 - level)
+        }
+    
+    return results
 
 
 def compute_standard_metrics(
@@ -329,16 +428,33 @@ class MetricsTracker:
             }
             metrics['augrc'] = compute_augrc(coverages, risks)
         
-        # Sensitivity @ Specificity
+        # Sensitivity @ multiple Specificity levels
         if probabilities is not None and probabilities.ndim == 2:
-            sens, thresh, spec = compute_sensitivity_at_specificity(
-                labels,
-                probabilities[:, 1],  # Prob of positive class
-                target_specificity=0.95
+            probs_pos = probabilities[:, 1]
+            
+            # Multi-threshold sensitivity
+            multi_sens = compute_sensitivity_at_multiple_specificities(
+                labels, probs_pos,
+                target_specificities=[0.80, 0.90, 0.95]
             )
-            metrics['sensitivity_at_95spec'] = sens
-            metrics['threshold_at_95spec'] = thresh
-            metrics['actual_specificity'] = spec
+            for key, vals in multi_sens.items():
+                metrics[key] = vals['sensitivity']
+            
+            # Legacy key for backward compatibility
+            metrics['sensitivity_at_95spec'] = multi_sens.get(
+                'sens_at_95spec', {}).get('sensitivity', 0.0)
+            metrics['threshold_at_95spec'] = multi_sens.get(
+                'sens_at_95spec', {}).get('threshold', 0.0)
+            metrics['actual_specificity'] = multi_sens.get(
+                'sens_at_95spec', {}).get('actual_specificity', 0.0)
+        
+        # FP Reduction at various abstention levels
+        if confidences is not None:
+            fp_reduction = compute_fp_reduction_at_abstention(
+                predictions, labels, confidences,
+                abstention_levels=[0.10, 0.20, 0.30]
+            )
+            metrics['fp_reduction'] = fp_reduction
         
         return metrics
 

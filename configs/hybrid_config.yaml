@@ -15,9 +15,9 @@ model:
 
 # Hybrid specific settings (EDL-based)
 evidential:
-  kl_weight: 0.2           # Slightly higher KL for the hybrid model
+  kl_weight: 1.0            # Full KL weight (annealed from 0)
   kl_anneal_start: 0
-  kl_anneal_end: 10
+  kl_anneal_end: 20
   uncertainty_type: 'epistemic'
 
 # Training hyperparameters

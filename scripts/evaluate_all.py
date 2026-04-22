@@ -259,13 +259,22 @@ def generate_results_table(all_results: dict) -> pd.DataFrame:
     rows = []
     for model_name, data in all_results.items():
         m = data['metrics']
+        
+        # FP Reduction at 20% abstention
+        fp_red_20 = 0.0
+        if 'fp_reduction' in m and 'abstention_20pct' in m['fp_reduction']:
+            fp_red_20 = m['fp_reduction']['abstention_20pct']['fp_reduction_rate']
+        
         rows.append({
             'Model': model_name,
             'Accuracy': f"{m['accuracy']:.4f}",
             'F1': f"{m['f1']:.4f}",
             'AUC-ROC': f"{m.get('auc', 0):.4f}",
             'AUGRC': f"{m.get('augrc', 0):.4f}",
+            'Sens@80%Spec': f"{m.get('sens_at_80spec', 0):.4f}",
+            'Sens@90%Spec': f"{m.get('sens_at_90spec', 0):.4f}",
             'Sens@95%Spec': f"{m.get('sensitivity_at_95spec', 0):.4f}",
+            'FP_Red@20%Abs': f"{fp_red_20:.2%}",
             'Abstention%': f"{m.get('abstention_rate', 0):.2%}",
         })
     return pd.DataFrame(rows)

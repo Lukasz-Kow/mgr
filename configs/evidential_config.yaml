@@ -15,9 +15,9 @@ model:
 
 # Evidential specific settings
 evidential:
-  kl_weight: 0.1           # Regularization weight
+  kl_weight: 1.0            # Regularization weight (annealed from 0)
   kl_anneal_start: 0       # Epoch to start annealing
-  kl_anneal_end: 10        # Epoch to reach max weight
+  kl_anneal_end: 20        # Epoch to reach max weight
   uncertainty_type: 'epistemic' # For rejection during evaluation
 
 # Training hyperparameters

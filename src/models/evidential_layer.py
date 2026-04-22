@@ -107,14 +107,14 @@ class EvidentialLoss(nn.Module):
     def __init__(
         self,
         num_classes: int = 2,
-        kl_weight: float = 0.1,
+        kl_weight: float = 1.0,
         kl_anneal_start: int = 0,
-        kl_anneal_end: int = 10
+        kl_anneal_end: int = 20
     ):
         """
         Args:
             num_classes: Number of classes
-            kl_weight: Weight for KL divergence term
+            kl_weight: Max weight for KL divergence term (reached after annealing)
             kl_anneal_start: Epoch to start annealing KL weight
             kl_anneal_end: Epoch to reach full KL weight
         """
@@ -133,7 +133,13 @@ class EvidentialLoss(nn.Module):
         labels: torch.Tensor
     ) -> Tuple[torch.Tensor, Dict]:
         """
-        Compute evidential loss.
+        Compute evidential loss (Sensoy et al. 2018).
+        
+        L = MSE + Variance + λ_t · KL
+        
+        MSE: (y_j - α_j/S)^2
+        Variance: α_j(S - α_j) / (S²(S+1))  — penalizes spread evidence
+        KL: KL[Dir(α̃) || Dir(1)] — regularization on incorrect classes
         
         Args:
             alpha: Dirichlet parameters (B, K)
@@ -151,27 +157,29 @@ class EvidentialLoss(nn.Module):
         # Strength (sum of alphas)
         S = alpha.sum(dim=1, keepdim=True)  # (B, 1)
         
-        # Bayes risk: E[L(y, ŷ)] under Dirichlet
-        # For square loss: L_bayes = Σ (y_i - α_i/S)^2 + Σ α_i(S - α_i) / (S^2(S+1))
-        
-        # Simplified: use expected cross-entropy
-        # E[CE] = Σ y_i * (ψ(S) - ψ(α_i))
-        # where ψ is digamma function
-        
-        # Alternative: MSE between one-hot and expected probability
+        # === BAYES RISK ===
+        # Expected probability: p_j = α_j / S
         expected_prob = alpha / S
+        
+        # MSE term: Σ_j (y_j - α_j/S)^2
         mse_loss = torch.sum((labels_one_hot - expected_prob) ** 2, dim=1)
-        bayes_loss = mse_loss.mean()
         
-        # KL divergence: KL(Dir(α) || Dir(1, ..., 1))
-        # Encourages high evidence (large α) for correct predictions
+        # Variance term: Σ_j α_j(S - α_j) / (S²(S+1))
+        # This term penalizes the model for NOT concentrating evidence
+        # on a single class — critical for decisive predictions
+        variance = torch.sum(
+            alpha * (S - alpha) / (S ** 2 * (S + 1)),
+            dim=1
+        )
         
-        # KL(Dir(α) || Dir(1)) = log(Γ(S)/Π Γ(α_i)) + Σ (α_i - 1)(ψ(α_i) - ψ(S))
-        # Simplified approximation:
+        bayes_loss = (mse_loss + variance).mean()
+        
+        # === KL DIVERGENCE REGULARIZATION ===
+        # KL(Dir(α̃) || Dir(1)) where α̃ removes evidence for correct class
+        # This penalizes confident WRONG predictions
         alpha_0 = torch.ones_like(alpha)  # Uniform prior
         
         # Only compute KL for incorrect predictions (where y_i = 0 but α_i > 1)
-        # This penalizes confident wrong predictions
         kl_alpha = (1 - labels_one_hot) * alpha + labels_one_hot * alpha_0
         kl_div = torch.sum(
             (alpha - kl_alpha) * (torch.digamma(alpha) - torch.digamma(S)),
@@ -179,7 +187,7 @@ class EvidentialLoss(nn.Module):
         )
         kl_loss = kl_div.mean()
         
-        # Anneal KL weight
+        # Anneal KL weight (λ_t: 0 → kl_weight over epochs)
         kl_coeff = self._get_kl_coefficient()
         
         # Total loss
@@ -190,6 +198,8 @@ class EvidentialLoss(nn.Module):
         
         metrics = {
             'bayes_loss': bayes_loss.item(),
+            'mse_loss': mse_loss.mean().item(),
+            'variance_loss': variance.mean().item(),
             'kl_loss': kl_loss.item(),
             'kl_coeff': kl_coeff,
             'mean_epistemic_unc': epistemic_unc.mean().item(),
@@ -199,6 +209,7 @@ class EvidentialLoss(nn.Module):
         }
         
         return total_loss, metrics
+
     
     def _get_kl_coefficient(self) -> float:
         """Get KL coefficient with annealing."""
