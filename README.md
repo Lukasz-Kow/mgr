@@ -103,11 +103,3 @@ Projekt implementuje następujące metryki zgodnie z wymaganiami:
 ```bash
 pytest tests/ -v
 ```
-
-## 📝 Autor
-
-Adam Stefański - Praca Magisterska
-
-## 📄 Licencja
-
-Projekt edukacyjny - Praca Magisterska
