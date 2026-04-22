@@ -57,6 +57,7 @@ def train():
 
     criterion = SelectiveNetLoss(
         target_coverage=config['selective_net']['target_coverage'],
+        alpha=config['selective_net'].get('alpha', 0.5),
         aux_weight=config['selective_net']['aux_weight'],
         coverage_penalty=config['selective_net']['coverage_penalty']
     )

@@ -17,15 +17,15 @@ model:
 evidential:
   kl_weight: 1.0            # Full KL weight (annealed from 0)
   kl_anneal_start: 0
-  kl_anneal_end: 20
+  kl_anneal_end: 30
   uncertainty_type: 'epistemic'
 
 # Training hyperparameters
 training:
-  epochs: 60               # Hybrids might need more time
+  epochs: 100              # Hybrid with variance term needs extended training
   batch_size: 4
-  learning_rate: 0.00005
-  weight_decay: 0.0005     # Slightly more weight decay for regularization
+  learning_rate: 0.0001
+  weight_decay: 0.0001     # Normalized weight decay
   
   # Optimizer
   optimizer: 'adamw'       # AdamW for better weight decay handling
@@ -33,7 +33,7 @@ training:
   # Learning rate scheduler
   scheduler:
     type: 'cosine'         # Cosine annealing for fine-tuning
-    t_max: 60
+    t_max: 100             # Must match epochs
     min_lr: 0.000001
   
   # Early stopping

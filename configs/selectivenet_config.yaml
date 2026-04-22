@@ -17,14 +17,15 @@ model:
 # SelectiveNet specific settings
 selective_net:
   target_coverage: 0.8     # The percentage of samples we want to classify
+  alpha: 0.5               # Weight for classification loss vs selection loss
   aux_weight: 0.3          # Weight for auxiliary head loss
   coverage_penalty: 10.0   # Penalty for deviating from target coverage
 
 # Training hyperparameters
 training:
-  epochs: 50
+  epochs: 80               # SelectiveNet needs more epochs for coverage stabilization
   batch_size: 4            # 3D volumes require small batch size
-  learning_rate: 0.00005
+  learning_rate: 0.0001
   weight_decay: 0.0001
   
   # Optimizer
@@ -40,7 +41,7 @@ training:
   # Early stopping
   early_stopping:
     enabled: true
-    patience: 10
+    patience: 15           # Increased: avoid premature stop during coverage ramp-up
     metric: 'val_loss'
     mode: 'min'
 

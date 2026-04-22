@@ -156,18 +156,21 @@ class SelectiveNetLoss(nn.Module):
     def __init__(
         self,
         target_coverage: float = 0.8,
+        alpha: float = 0.5,
         aux_weight: float = 0.3,
         coverage_penalty: float = 10.0
     ):
         """
         Args:
             target_coverage: Desired coverage (% of samples not abstained)
+            alpha: Weight for classification loss (higher = prioritize accuracy)
             aux_weight: Weight for auxiliary loss
             coverage_penalty: Penalty for not meeting target coverage
         """
         super().__init__()
         
         self.target_coverage = target_coverage
+        self.alpha = alpha
         self.aux_weight = aux_weight
         self.coverage_penalty = coverage_penalty
         
@@ -215,8 +218,8 @@ class SelectiveNetLoss(nn.Module):
         # Auxiliary loss (standard CE on auxiliary head)
         aux_loss = self.ce_loss(aux_logits, labels).mean()
         
-        # Total loss
-        total_loss = selective_loss + coverage_loss + self.aux_weight * aux_loss
+        # Total loss (alpha weights classification vs selection)
+        total_loss = self.alpha * selective_loss + coverage_loss + self.aux_weight * aux_loss
         
         # Metrics for monitoring
         metrics = {
