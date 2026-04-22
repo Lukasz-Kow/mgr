@@ -120,9 +120,21 @@ def train():
         else:
             early_stop_counter += 1
             if early_stop_counter >= config['training']['early_stopping']['patience']:
+                print(f"\n🛑 STOP: Early stopping triggered at epoch {epoch+1}.")
+                print(f"   Metric 'val_loss' stopped improving for {config['training']['early_stopping']['patience']} epochs.")
+                stop_reason = "Early Stopping"
                 break
+        
+        if epoch + 1 == config['training']['epochs']:
+            stop_reason = "Limit of Epochs reached"
 
-    print("\n✅ SelectiveNet training finished!")
+    print("\n" + "="*60)
+    print(f"✅ SELECTIVENET TRAINING FINISHED")
+    print(f"   Reason: {stop_reason}")
+    print(f"   Best Val Loss: {best_val_loss:.4f}")
+    print(f"   Final Epoch: {epoch+1}")
+    print("="*60)
+    print(f"Model saved to: {checkpoint_dir / 'best_model.pt'}")
 
 if __name__ == '__main__':
     train()

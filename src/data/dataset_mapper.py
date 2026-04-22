@@ -9,6 +9,7 @@ Class Mapping:
 """
 
 import os
+import re
 import pandas as pd
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -227,6 +228,38 @@ class DatasetMapper:
         
         return images
     
+    @staticmethod
+    def _extract_patient_id(filepath: str) -> str:
+        """
+        Wyciąga ID pacjenta z nazwy pliku obrazu 2D.
+        
+        Konwencja nazewnictwa w Alzheimer_MRI_4_classes_dataset:
+            '<patient_num> (<slice_num>).jpg' → patient_id = '<subfolder>_<patient_num>'
+            '<patient_num>.jpg' → patient_id = '<subfolder>_<patient_num>'
+        
+        Przykłady:
+            'NonDemented_7th_part/9 (11).jpg' → 'NonDemented_7th_part_9'
+            'NonDemented_1st_part/12.jpg' → 'NonDemented_1st_part_12'
+            
+        Dla plików ADNI (.nii), zwraca Subject ID z kolumny 'subject' (obsługiwane osobno).
+        
+        Args:
+            filepath: Ścieżka do pliku obrazu
+            
+        Returns:
+            Unikalny identyfikator pacjenta
+        """
+        p = Path(filepath)
+        filename = p.stem  # np. '9 (11)' lub '8'
+        parent = p.parent.name  # np. 'NonDemented_7th_part'
+        
+        # Wyciągnij numer pacjenta (cyfry na początku nazwy pliku)
+        match = re.match(r'^(\d+)', filename)
+        if match:
+            patient_num = match.group(1)
+            return f"{parent}_{patient_num}"
+        return f"{parent}_{filename}"
+
     def create_splits(
         self, 
         df: pd.DataFrame, 
@@ -237,7 +270,11 @@ class DatasetMapper:
         random_seed: int = 42
     ) -> pd.DataFrame:
         """
-        Tworzy podział train/val/test.
+        Tworzy podział train/val/test na poziomie pacjentów (subject-level split).
+        
+        Zgodnie z Wen et al. (2020), podział musi gwarantować, że WSZYSTKIE
+        obrazy (plastry MRI) tego samego pacjenta trafiają do tego samego zbioru.
+        Zapobiega to wyciekowi danych (data leakage) i zawyżaniu wyników.
         
         Args:
             df: DataFrame z metadanymi
@@ -258,46 +295,96 @@ class DatasetMapper:
         df = df.copy()
         df['split'] = None
         
+        # Wyciągnij patient_id jeśli brak kolumny 'subject'
+        if 'subject' not in df.columns:
+            df['subject'] = df['path'].apply(self._extract_patient_id)
+            print(f"Wyodrębniono {df['subject'].nunique()} unikalnych pacjentów z nazw plików.")
+        
         if stratify:
-            # Stratified split - zachowuje proporcje klas
+            # Stratified split na poziomie pacjentów - zachowuje proporcje klas
             for label in df['label'].unique():
-                class_indices = df[df['label'] == label].index.tolist()
-                random.shuffle(class_indices)
+                class_df = df[df['label'] == label]
+                unique_subjects = class_df['subject'].unique().tolist()
+                random.shuffle(unique_subjects)
                 
-                n = len(class_indices)
+                n = len(unique_subjects)
                 n_train = int(n * train_ratio)
                 n_val = int(n * val_ratio)
                 
-                df.loc[class_indices[:n_train], 'split'] = 'train'
-                df.loc[class_indices[n_train:n_train+n_val], 'split'] = 'val'
-                df.loc[class_indices[n_train+n_val:], 'split'] = 'test'
+                train_subjects = set(unique_subjects[:n_train])
+                val_subjects = set(unique_subjects[n_train:n_train+n_val])
+                test_subjects = set(unique_subjects[n_train+n_val:])
+                
+                # Przypisz WSZYSTKIE obrazy pacjenta do tego samego splitu
+                for idx in class_df.index:
+                    subj = df.loc[idx, 'subject']
+                    if subj in train_subjects:
+                        df.loc[idx, 'split'] = 'train'
+                    elif subj in val_subjects:
+                        df.loc[idx, 'split'] = 'val'
+                    else:
+                        df.loc[idx, 'split'] = 'test'
         else:
-            # Random split
-            indices = df.index.tolist()
-            random.shuffle(indices)
+            # Random split na poziomie pacjentów
+            unique_subjects = df['subject'].unique().tolist()
+            random.shuffle(unique_subjects)
             
-            n = len(indices)
+            n = len(unique_subjects)
             n_train = int(n * train_ratio)
             n_val = int(n * val_ratio)
             
-            df.loc[indices[:n_train], 'split'] = 'train'
-            df.loc[indices[n_train:n_train+n_val], 'split'] = 'val'
-            df.loc[indices[n_train+n_val:], 'split'] = 'test'
+            train_subjects = set(unique_subjects[:n_train])
+            val_subjects = set(unique_subjects[n_train:n_train+n_val])
+            test_subjects = set(unique_subjects[n_train+n_val:])
+            
+            for idx in df.index:
+                subj = df.loc[idx, 'subject']
+                if subj in train_subjects:
+                    df.loc[idx, 'split'] = 'train'
+                elif subj in val_subjects:
+                    df.loc[idx, 'split'] = 'val'
+                else:
+                    df.loc[idx, 'split'] = 'test'
+        
+        # Walidacja: sprawdź brak wycieku między zbiorami
+        self._validate_no_leakage(df)
         
         # Statystyki splits
         print("\\n" + "="*50)
-        print("Split Statistics:")
+        print("Split Statistics (subject-level split, Wen et al. 2020):")
         print("="*50)
         for split in ['train', 'val', 'test']:
             split_df = df[df['split'] == split]
+            n_subjects = split_df['subject'].nunique()
             print(f"\\n{split.upper()}:")
-            print(f"  Total: {len(split_df)}")
+            print(f"  Total images: {len(split_df)}")
+            print(f"  Total subjects: {n_subjects}")
             for class_name in split_df['class_name'].unique():
-                count = len(split_df[split_df['class_name'] == class_name])
-                print(f"    {class_name}: {count}")
+                class_split = split_df[split_df['class_name'] == class_name]
+                count = len(class_split)
+                n_subj = class_split['subject'].nunique()
+                print(f"    {class_name}: {count} images, {n_subj} subjects")
         print("="*50)
         
         return df
+    
+    def _validate_no_leakage(self, df: pd.DataFrame):
+        """
+        Sprawdza, czy żaden pacjent nie występuje w więcej niż jednym zbiorze.
+        Zgłasza błąd jeśli wykryto wyciek danych.
+        """
+        split_pairs = [('train', 'val'), ('train', 'test'), ('val', 'test')]
+        for s1, s2 in split_pairs:
+            subjects_s1 = set(df[df['split'] == s1]['subject'])
+            subjects_s2 = set(df[df['split'] == s2]['subject'])
+            overlap = subjects_s1 & subjects_s2
+            if overlap:
+                print(f"⚠️  WYCIEK DANYCH: {len(overlap)} pacjentów w {s1} i {s2}: {list(overlap)[:5]}...")
+            else:
+                print(f"✅ Brak wycieku między {s1} a {s2}")
+        
+        total_subjects = df['subject'].nunique()
+        print(f"\\nŁącznie unikalnych pacjentów: {total_subjects}")
     
     def save_metadata(self, df: pd.DataFrame, output_path: str):
         """

@@ -260,13 +260,20 @@ def main():
         # Early stopping
         if config['training']['early_stopping']['enabled']:
             if patience_counter >= config['training']['early_stopping']['patience']:
-                print(f"\n⚠️  Early stopping triggered after {epoch} epochs")
+                print(f"\n🛑 STOP: Early stopping triggered at epoch {epoch}.")
+                print(f"   Metric '{config['checkpoint']['monitor']}' stopped improving for {config['training']['early_stopping']['patience']} epochs.")
+                stop_reason = "Early Stopping"
                 break
+        
+        if epoch == config['training']['epochs']:
+            stop_reason = "Limit of Epochs reached"
     
     print("\n" + "="*60)
-    print("✅ Training complete!")
+    print(f"✅ TRAINING FINISHED")
+    print(f"   Reason: {stop_reason}")
+    print(f"   Best {config['checkpoint']['monitor']}: {best_val_metric:.4f}")
+    print(f"   Final Epoch: {epoch}")
     print("="*60)
-    print(f"Best {config['checkpoint']['monitor']}: {best_val_metric:.4f}")
     print(f"Model saved to: {checkpoint_dir / 'best_model.pth'}")
     
     writer.close()

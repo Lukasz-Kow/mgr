@@ -12,6 +12,7 @@ import numpy as np
 from PIL import Image
 from typing import Tuple, Optional
 import torch
+from scipy.ndimage import rotate, shift
 
 
 class MRIPreprocessor:
@@ -167,54 +168,105 @@ class AugmentationPipeline:
     def __init__(
         self,
         horizontal_flip: bool = True,
-        rotation_range: float = 15.0,  # degrees
+        rotation_range: float = 10.0,  # degrees
         random_brightness: float = 0.1,
-        random_contrast: float = 0.1
+        random_contrast: float = 0.1,
+        shift_3d_range: float = 5.0,   # pixels
+        noise_std: float = 0.01        # std of gaussian noise
     ):
         """
         Args:
             horizontal_flip: Czy stosować horizontal flip
-            rotation_range: Zakres rotacji w stopniach (+/-)
+            rotation_range: Zakres rotacji w stopniach (+/-) na każdą z 3 osi
             random_brightness: Zakres zmiany jasności
             random_contrast: Zakres zmiany kontrastu
+            shift_3d_range: Zakres przesunięcia w pikselach (+/-)
+            noise_std: Odchylenie standardowe szumu Gaussa
         """
         self.horizontal_flip = horizontal_flip
         self.rotation_range = rotation_range
         self.random_brightness = random_brightness
         self.random_contrast = random_contrast
+        self.shift_3d_range = shift_3d_range
+        self.noise_std = noise_std
+
+    def _random_3d_rotation(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Wykonuje losowe obroty 3D na wszystkich osiach."""
+        # Kąty dla osi X, Y, Z
+        angles = [np.random.uniform(-self.rotation_range, self.rotation_range) for _ in range(3)]
         
+        # Konwersja do numpy (C, D, H, W) -> (D, H, W) dla pojedynczego kanału
+        arr = tensor.squeeze(0).numpy()
+        
+        # Obroty na 3 płaszczyznach
+        # Axial (płaszczyzna H-W, oś D)
+        arr = rotate(arr, angles[0], axes=(1, 2), reshape=False, order=1, mode='constant', cval=0.0)
+        # Coronal (płaszczyzna D-W, oś H)
+        arr = rotate(arr, angles[1], axes=(0, 2), reshape=False, order=1, mode='constant', cval=0.0)
+        # Sagittal (płaszczyzna D-H, oś W)
+        arr = rotate(arr, angles[2], axes=(0, 1), reshape=False, order=1, mode='constant', cval=0.0)
+        
+        return torch.from_numpy(arr).unsqueeze(0)
+
+    def _random_3d_shift(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Wykonuje losowe przesunięcie 3D."""
+        shifts = [np.random.uniform(-self.shift_3d_range, self.shift_3d_range) for _ in range(3)]
+        
+        arr = tensor.squeeze(0).numpy()
+        arr = shift(arr, shift=shifts, order=1, mode='constant', cval=0.0)
+        
+        return torch.from_numpy(arr).unsqueeze(0)
+
+    def _random_gaussian_noise(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Dodaje szum Gaussa."""
+        if self.noise_std > 0:
+            noise = torch.randn_like(tensor) * self.noise_std
+            return tensor + noise
+        return tensor
+
     def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
         """
-        Aplikuje augmentacje do tensora (obsługuje 2D i 3D).
+        Aplikuje intensywne augmentacje 3D dla ADNI lub 2D dla Kaggle.
         
         Args:
-            tensor: Input tensor (1, H, W) dla 2D lub (1, D, H, W) dla 3D
+            tensor: Input tensor (1, D, H, W) lub (1, H, W)
             
         Returns:
             Augmented tensor
         """
-        # Random horizontal flip (along the last dimension)
-        if self.horizontal_flip and torch.rand(1).item() > 0.5:
-            # W 2D (C, H, W) flipujemy W (dim=2)
-            # W 3D (C, D, H, W) flipujemy W (dim=3)
-            tensor = torch.flip(tensor, dims=[-1])
+        is_3d = (len(tensor.shape) == 4)
         
-        # Simple rotation (only for 2D, for 3D it's more complex)
-        if self.rotation_range > 0 and len(tensor.shape) == 3:
-            import torchvision.transforms.functional as TF
-            angle = (torch.rand(1).item() - 0.5) * 2 * self.rotation_range
-            tensor = TF.rotate(tensor, angle, fill=0.0)
-        # TODO: Add 3D rotation if needed using scipy or torch-based affine
-        
-        # Random brightness and contrast (dimension-agnostic)
-        if self.random_brightness > 0:
-            brightness_factor = 1.0 + (torch.rand(1).item() - 0.5) * 2 * self.random_brightness
-            tensor = tensor * brightness_factor
+        if is_3d:
+            # --- AUGMENTACJE 3D (ADNI) ---
             
-        if self.random_contrast > 0:
-            contrast_factor = 1.0 + (torch.rand(1).item() - 0.5) * 2 * self.random_contrast
-            mean = tensor.mean()
-            tensor = (tensor - mean) * contrast_factor + mean
+            # 1. Losowa rotacja we wszystkich trzech osiach
+            if self.rotation_range > 0:
+                tensor = self._random_3d_rotation(tensor)
+                
+            # 2. Losowe przesunięcie (Shift)
+            if self.shift_3d_range > 0:
+                tensor = self._random_3d_shift(tensor)
+                
+            # 3. Horizontal Flip (anatomical left-right)
+            # W 3D (C, D, H, W), oś W to dim=3
+            if self.horizontal_flip and torch.rand(1).item() > 0.5:
+                tensor = torch.flip(tensor, dims=[-1])
+                
+        else:
+            # --- AUGMENTACJE 2D (Kaggle) ---
+            if self.horizontal_flip and torch.rand(1).item() > 0.5:
+                tensor = torch.flip(tensor, dims=[-1])
+            
+            if self.rotation_range > 0:
+                import torchvision.transforms.functional as TF
+                angle = (torch.rand(1).item() - 0.5) * 2 * self.rotation_range
+                tensor = TF.rotate(tensor, angle, fill=0.0)
+        
+        # --- AUGMENTACJE WSPÓLNE (Intensywność / Szum) ---
+        
+        # 4. Szum Gaussa (kluczowy dla robustness EDL)
+        if self.noise_std > 0:
+            tensor = self._random_gaussian_noise(tensor)
         
         return tensor
 
@@ -255,7 +307,9 @@ def get_augmentation(config: dict, is_train: bool = True) -> Optional[Augmentati
     
     return AugmentationPipeline(
         horizontal_flip=aug_config.get('horizontal_flip', True),
-        rotation_range=aug_config.get('rotation_range', 15.0),
+        rotation_range=aug_config.get('rotation_range', 10.0),
         random_brightness=aug_config.get('random_brightness', 0.1),
-        random_contrast=aug_config.get('random_contrast', 0.1)
+        random_contrast=aug_config.get('random_contrast', 0.1),
+        shift_3d_range=aug_config.get('shift_3d_range', 5.0),
+        noise_std=aug_config.get('noise_std', 0.01)
     )
