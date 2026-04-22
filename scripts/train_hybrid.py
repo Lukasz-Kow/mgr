@@ -51,7 +51,8 @@ def train():
         preprocessor_config=data_cfg['preprocessing'],
         batch_size=config['training']['batch_size'],
         num_workers=data_cfg['dataloader']['num_workers'],
-        augmentation_config=data_cfg
+        augmentation_config=data_cfg,
+        cache_dir='cache/hybrid'
     )
 
     train_loader = dm.train_dataloader()
@@ -93,6 +94,15 @@ def train():
     best_val_loss = float('inf')
     early_stop_counter = 0
 
+    # Mixed Precision scaler (only effective on CUDA)
+    scaler = torch.amp.GradScaler('cuda') if device.type == 'cuda' else None
+    use_amp = (scaler is not None)
+    if use_amp:
+        print("⚡ Mixed Precision (AMP) enabled")
+
+    # Validate every N epochs
+    validate_every_n = config['training'].get('validate_every_n', 1)
+
     print(f"\nStarting Hybrid model training for {config['training']['epochs']} epochs...")
     
     for epoch in range(config['training']['epochs']):
@@ -106,16 +116,28 @@ def train():
             images, labels = images.to(device), labels.to(device)
             
             optimizer.zero_grad()
-            alpha = model(images)
-            loss, loss_dict = criterion(alpha, labels)
             
-            loss.backward()
-            optimizer.step()
+            with torch.amp.autocast('cuda', enabled=use_amp):
+                alpha = model(images)
+                loss, loss_dict = criterion(alpha, labels)
+            
+            if scaler:
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
             
             train_loss += loss.item()
             pbar.set_postfix({'loss': loss.item(), 'kl': loss_dict['kl_coeff']})
         
         avg_train_loss = train_loss / len(train_loader)
+
+        # Skip validation on intermediate epochs if configured
+        if (epoch + 1) % validate_every_n != 0 and (epoch + 1) != config['training']['epochs']:
+            print(f"Epoch {epoch+1}: Train Loss={avg_train_loss:.4f} (validation skipped)")
+            continue
 
         # Validation
         model.eval()
@@ -134,6 +156,7 @@ def train():
                 probs = alpha / strength
                 preds = torch.argmax(probs, dim=1)
                 # Uncertainty for rejection sweep
+                # Adjust formula based on EDL conventions
                 epi_unc = config['model']['classifier']['num_classes'] / strength.squeeze()
                 
                 tracker.update(preds, labels, confidences=1-epi_unc, probabilities=probs)

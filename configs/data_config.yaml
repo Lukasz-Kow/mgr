@@ -26,7 +26,7 @@ splits:
 # DataLoader settings
 dataloader:
   batch_size: 4  # Smaller batch size for 3D
-  num_workers: 2
+  num_workers: -1  # Automatic detection
   pin_memory: true
 
 # Paths

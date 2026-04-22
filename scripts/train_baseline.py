@@ -33,23 +33,31 @@ def load_config(config_path: str) -> dict:
     return config
 
 
-def train_epoch(model, dataloader, criterion, optimizer, device, epoch, writer, log_interval=10):
-    """Train for one epoch."""
+def train_epoch(model, dataloader, criterion, optimizer, device, epoch, writer, log_interval=10, scaler=None):
+    """Train for one epoch with optional Mixed Precision."""
     model.train()
     running_loss = 0.0
+    use_amp = (scaler is not None and device.type == 'cuda')
     
     pbar = tqdm(dataloader, desc=f'Epoch {epoch} [TRAIN]')
     for batch_idx, (images, labels, _) in enumerate(pbar):
         images, labels = images.to(device), labels.to(device)
         
-        # Forward
-        logits = model(images)
-        loss = criterion(logits, labels)
-        
-        # Backward
         optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        
+        # Forward with AMP
+        with torch.amp.autocast('cuda', enabled=use_amp):
+            logits = model(images)
+            loss = criterion(logits, labels)
+        
+        # Backward with scaler
+        if scaler:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            optimizer.step()
         
         # Logging
         running_loss += loss.item()
@@ -131,7 +139,8 @@ def main():
         preprocessor_config=data_config['preprocessing'],
         batch_size=config['training']['batch_size'],
         num_workers=data_config['dataloader']['num_workers'],
-        augmentation_config=data_config.get('augmentation')
+        augmentation_config=data_config.get('augmentation'),
+        cache_dir='cache/baseline'
     )
     
     train_loader = data_module.train_dataloader()
@@ -204,14 +213,29 @@ def main():
     best_val_metric = float('inf')
     patience_counter = 0
     
+    # Mixed Precision scaler (only effective on CUDA)
+    scaler = torch.amp.GradScaler('cuda') if device.type == 'cuda' else None
+    if scaler:
+        print("⚡ Mixed Precision (AMP) enabled")
+    
+    # Validate every N epochs (speeds up training on slow hardware)
+    validate_every_n = config['training'].get('validate_every_n', 1)
+    
     for epoch in range(1, config['training']['epochs'] + 1):
         print(f"\nEpoch {epoch}/{config['training']['epochs']}")
         
         # Train
         train_loss = train_epoch(
             model, train_loader, criterion, optimizer, device,
-            epoch, writer, config['logging']['log_interval']
+            epoch, writer, config['logging']['log_interval'],
+            scaler=scaler
         )
+        
+        # Skip validation on intermediate epochs if configured
+        if epoch % validate_every_n != 0 and epoch != config['training']['epochs']:
+            print(f"  Train Loss: {train_loss:.4f} (validation skipped)")
+            writer.add_scalar('Train/Epoch_Loss', train_loss, epoch)
+            continue
         
         # Validate
         val_metrics = validate(model, val_loader, criterion, device)

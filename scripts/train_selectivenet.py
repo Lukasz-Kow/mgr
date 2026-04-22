@@ -41,7 +41,8 @@ def train():
         preprocessor_config=data_cfg['preprocessing'],
         batch_size=config['training']['batch_size'],
         num_workers=data_cfg['dataloader']['num_workers'],
-        augmentation_config=data_cfg
+        augmentation_config=data_cfg,
+        cache_dir='cache/selective_net'
     )
 
     train_loader = dm.train_dataloader()
@@ -71,6 +72,15 @@ def train():
     best_val_loss = float('inf')
     early_stop_counter = 0
 
+    # Mixed Precision
+    scaler = torch.amp.GradScaler('cuda') if device.type == 'cuda' else None
+    use_amp = (scaler is not None)
+    if use_amp:
+        print("⚡ Mixed Precision (AMP) enabled")
+
+    # Validate every N epochs
+    validate_every_n = config['training'].get('validate_every_n', 1)
+
     print(f"\nStarting SelectiveNet training...")
     
     for epoch in range(config['training']['epochs']):
@@ -82,15 +92,29 @@ def train():
             images, labels = images.to(device), labels.to(device)
             
             optimizer.zero_grad()
-            pred_logits, selection_probs, aux_logits = model(images, return_selection=True, return_auxiliary=True)
-            loss, loss_dict = criterion(pred_logits, selection_probs, aux_logits, labels)
             
-            loss.backward()
-            optimizer.step()
+            with torch.amp.autocast('cuda', enabled=use_amp):
+                pred_logits, selection_probs, aux_logits = model(images, return_selection=True, return_auxiliary=True)
+                loss, loss_dict = criterion(pred_logits, selection_probs, aux_logits, labels)
+            
+            if scaler:
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
             
             train_loss += loss.item()
             pbar.set_postfix({'loss': loss.item(), 'cov': loss_dict['coverage']})
         
+        avg_train_loss = train_loss / len(train_loader)
+
+        # Skip validation on intermediate epochs if configured
+        if (epoch + 1) % validate_every_n != 0 and (epoch + 1) != config['training']['epochs']:
+            print(f"Epoch {epoch+1}: Train Loss={avg_train_loss:.4f} (validation skipped)")
+            continue
+
         # Validation
         model.eval()
         val_loss = 0.0
