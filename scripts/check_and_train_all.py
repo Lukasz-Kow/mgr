@@ -36,9 +36,12 @@ def check_checkpoint(name, path):
     
     is_3d = False
     for k in list(sd.keys()):
-        if 'conv' in k and 'weight' in k:
-            is_3d = len(sd[k].shape) == 5
-            break
+        # Check any weight tensor
+        if 'weight' in k and isinstance(sd[k], torch.Tensor):
+            # 3D kernels are 5D (out_c, in_c, d, h, w)
+            if len(sd[k].shape) == 5:
+                is_3d = True
+                break
     
     size_mb = os.path.getsize(path) / (1024 * 1024)
     return '3D' if is_3d else '2D', size_mb

@@ -14,6 +14,9 @@ import torch
 import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
+import numpy as np
+import time
+from datetime import datetime
 import argparse
 from pathlib import Path
 
@@ -34,13 +37,21 @@ def load_config(config_path: str) -> dict:
 
 
 def train_epoch(model, dataloader, criterion, optimizer, device, epoch, writer, log_interval=10, scaler=None):
-    """Train for one epoch with optional Mixed Precision."""
+    """Train for one epoch with performance timing."""
     model.train()
     running_loss = 0.0
     use_amp = (scaler is not None and device.type == 'cuda')
     
+    # Timing accumulation
+    t0 = time.time()
+    data_times = []
+    model_times = []
+    
     pbar = tqdm(dataloader, desc=f'Epoch {epoch} [TRAIN]')
     for batch_idx, (images, labels, _) in enumerate(pbar):
+        t1 = time.time()
+        data_times.append(t1 - t0)
+        
         images, labels = images.to(device), labels.to(device)
         
         optimizer.zero_grad()
@@ -62,13 +73,22 @@ def train_epoch(model, dataloader, criterion, optimizer, device, epoch, writer, 
         # Logging
         running_loss += loss.item()
         
+        t2 = time.time()
+        model_times.append(t2 - t1)
+        
         if (batch_idx + 1) % log_interval == 0:
             avg_loss = running_loss / (batch_idx + 1)
-            pbar.set_postfix({'loss': f'{avg_loss:.4f}'})
-            
-            if writer:
-                global_step = epoch * len(dataloader) + batch_idx
-                writer.add_scalar('Train/Loss', avg_loss, global_step)
+            pbar.set_postfix({
+                'loss': f'{avg_loss:.4f}',
+                'dt': f'{np.mean(data_times):.2f}s',
+                'mt': f'{np.mean(model_times):.1f}s'
+            })
+        t0 = time.time()
+    
+    # Summary of timing
+    avg_dt = np.mean(data_times)
+    avg_mt = np.mean(model_times)
+    print(f"\n  ⏱️ Performance: Data/Aug Loading={avg_dt:.2f}s, Model Compute={avg_mt:.2f}s")
     
     return running_loss / len(dataloader)
 
@@ -139,7 +159,7 @@ def main():
         preprocessor_config=data_config['preprocessing'],
         batch_size=config['training']['batch_size'],
         num_workers=data_config['dataloader']['num_workers'],
-        augmentation_config=data_config.get('augmentation'),
+        augmentation_config=data_config,
         cache_dir='cache/baseline'
     )
     

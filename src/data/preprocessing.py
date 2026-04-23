@@ -262,12 +262,12 @@ class AugmentationPipeline:
                 try:
                     import torchio as tio
                     # TorchIO wymaga 4D: (C, D, H, W) — tensor już jest w tym formacie
-                    subject = tio.Subject(image=tio.ScalarImage(tensor=tensor.unsqueeze(0)))
+                    subject = tio.Subject(image=tio.ScalarImage(tensor=tensor))
                     transform = tio.RandomElasticDeformation(
                         num_control_points=7,
                         max_displacement=7.5,
                     )
-                    tensor = transform(subject).image.data.squeeze(0)
+                    tensor = transform(subject).image.data
                 except ImportError:
                     pass  # TorchIO not installed, skip
             
@@ -275,9 +275,9 @@ class AugmentationPipeline:
             if self.bias_field:
                 try:
                     import torchio as tio
-                    subject = tio.Subject(image=tio.ScalarImage(tensor=tensor.unsqueeze(0)))
+                    subject = tio.Subject(image=tio.ScalarImage(tensor=tensor))
                     transform = tio.RandomBiasField(coefficients=0.5)
-                    tensor = transform(subject).image.data.squeeze(0)
+                    tensor = transform(subject).image.data
                 except ImportError:
                     pass  # TorchIO not installed, skip
                 
@@ -330,8 +330,13 @@ def get_augmentation(config: dict, is_train: bool = True) -> Optional[Augmentati
     if not is_train:
         return None
     
-    aug_config = config.get('augmentation', {})
-    if not aug_config.get('enabled', True):
+    # Handle both root config (with 'augmentation' key) and branch config
+    if 'augmentation' in config:
+        aug_config = config['augmentation']
+    else:
+        aug_config = config
+        
+    if not aug_config.get('enabled', False):
         return None
     
     return AugmentationPipeline(
