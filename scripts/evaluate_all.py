@@ -166,15 +166,11 @@ def load_model(m_cfg, cfg, device):
     return model, ckpt_path
 
 
-def evaluate_model(model, m_cfg, test_loader, device):
+def evaluate_model(model, m_cfg, test_loader, device, target_spec=0.95):
     """
     Ewaluuje jeden model na zbiorze testowym.
-
-    Returns:
-        Dict z wynikami: predictions, labels, confidences, probabilities,
-        metrics, uncertainty_data (dla modeli ewidencyjnych), metadata
     """
-    tracker = MetricsTracker(num_classes=2)
+    tracker = MetricsTracker(num_classes=2, target_specificity=target_spec)
 
     all_preds = []
     all_labels = []
@@ -254,11 +250,12 @@ def evaluate_model(model, m_cfg, test_loader, device):
     return result
 
 
-def generate_results_table(all_results: dict) -> pd.DataFrame:
+def generate_results_table(all_results: dict, target_spec: float = 0.95) -> pd.DataFrame:
     """Generuje tabelę podsumowującą wyniki wszystkich modeli."""
     rows = []
     for model_name, data in all_results.items():
         m = data['metrics']
+        ms = m.get('metrics_at_target_spec', {})
         
         # FP Reduction at 20% abstention
         fp_red_20 = 0.0
@@ -268,13 +265,11 @@ def generate_results_table(all_results: dict) -> pd.DataFrame:
         rows.append({
             'Model': model_name,
             'Accuracy': f"{m['accuracy']:.4f}",
-            'F1': f"{m['f1']:.4f}",
             'AUC-ROC': f"{m.get('auc', 0):.4f}",
             'AUGRC': f"{m.get('augrc', 0):.4f}",
-            'Sens@80%Spec': f"{m.get('sens_at_80spec', 0):.4f}",
-            'Sens@90%Spec': f"{m.get('sens_at_90spec', 0):.4f}",
-            'Sens@95%Spec': f"{m.get('sensitivity_at_95spec', 0):.4f}",
-            'FP_Red@20%Abs': f"{fp_red_20:.2%}",
+            f'Sens@{target_spec:.0%}Spec': f"{ms.get('sensitivity', 0):.4f}",
+            f'Acc@{target_spec:.0%}Spec': f"{ms.get('accuracy', 0):.4f}",
+            f'F1@{target_spec:.0%}Spec': f"{ms.get('f1', 0):.4f}",
             'Abstention%': f"{m.get('abstention_rate', 0):.2%}",
         })
     return pd.DataFrame(rows)
@@ -289,9 +284,20 @@ def evaluate():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"  Device: {device}")
 
-    # ── Konfiguracja danych ──────────────────────────────────────────────
+    # ── Konfiguracja danych i ewaluacji ──────────────────────────────────
     with open('configs/data_config.yaml', 'r') as f:
         data_cfg = yaml.safe_load(f)
+    
+    # Załaduj konfigurację ewaluacji (nowy plik)
+    eval_cfg_path = Path('configs/evaluation_config.yaml')
+    if eval_cfg_path.exists():
+        with open(eval_cfg_path, 'r') as f:
+            eval_cfg = yaml.safe_load(f)
+    else:
+        eval_cfg = {'target_specificity': 0.95}
+    
+    target_spec = eval_cfg.get('target_specificity', 0.95)
+    print(f"  Target Specificity (sztywny próg): {target_spec:.2%}")
 
     dm = MCIDataModule(
         metadata_csv=data_cfg['paths']['metadata_csv'],
@@ -333,16 +339,19 @@ def evaluate():
         if model is None:
             continue
 
-        result = evaluate_model(model, m_cfg, test_loader, device)
+        result = evaluate_model(model, m_cfg, test_loader, device, target_spec=target_spec)
         all_results[m_cfg['name']] = result
 
-        # Drukuj metryki
         m = result['metrics']
+        ms = m.get('metrics_at_target_spec', {})
         print(f"     Accuracy:  {m['accuracy']:.4f}")
         print(f"     F1:        {m['f1']:.4f}")
         print(f"     AUC:       {m.get('auc', 0):.4f}")
         print(f"     AUGRC:     {m.get('augrc', 0):.4f}")
-        print(f"     Sens@95%:  {m.get('sensitivity_at_95spec', 0):.4f}")
+        print(f"     --- @ {target_spec*100:.0f}% Specificity ---")
+        print(f"     Sensitivity: {ms.get('sensitivity', 0):.4f}")
+        print(f"     Accuracy:    {ms.get('accuracy', 0):.4f}")
+        print(f"     F1:          {ms.get('f1', 0):.4f}")
 
         # Zwolnij pamięć GPU
         del model
@@ -357,7 +366,7 @@ def evaluate():
     print("  ETAP 2: Tabela wyników")
     print("─" * 70)
 
-    results_df = generate_results_table(all_results)
+    results_df = generate_results_table(all_results, target_spec=target_spec)
     csv_path = results_dir / 'final_comparison.csv'
     results_df.to_csv(csv_path, index=False)
     print(f"\n{results_df.to_string(index=False)}")
@@ -385,26 +394,41 @@ def evaluate():
     roc_data = {}
     for name, data in all_results.items():
         probs = data['probabilities']
-        if probs.ndim == 2:
-            probs_pos = probs[:, 1]
-        else:
-            probs_pos = probs
+        probs_pos = probs[:, 1] if probs.ndim == 2 else probs
         roc_data[name] = {
             'labels': data['labels'],
             'probabilities': probs_pos,
         }
     if roc_data:
-        plot_roc_curves_comparison(roc_data, results_dir / 'roc_curves_comparison.png')
+        plot_roc_curves_comparison(
+            roc_data, 
+            results_dir / 'roc_curves_comparison.png',
+            target_specificity=target_spec
+        )
 
-    # 3c. Macierze konfuzji
+    # 3c. Macierze konfuzji (używamy punktu pracy z target specificity)
     cm_data = {}
     for name, data in all_results.items():
+        m = data['metrics']
+        ms = m.get('metrics_at_target_spec', {})
+        threshold = ms.get('threshold', 0.5)
+        
+        probs = data['probabilities']
+        probs_pos = probs[:, 1] if probs.ndim == 2 else probs
+        
+        # Wyznacz predykcje dla ustalonego punktu pracy
+        preds_at_spec = (probs_pos >= threshold).astype(int)
+        
+        # Jeśli model miał abstencje w oryginalnych predykcjach, zachowaj je?
+        # Tutaj lepiej pokazać pełną macierz dla punktu pracy bez abstencji 
+        # LUB zintegrować to. Przyjmijmy predykcje dla ustalonego progu.
+        
         cm_data[name] = {
-            'predictions': data['predictions'],
+            'predictions': preds_at_spec,
             'labels': data['labels'],
         }
     if cm_data:
-        plot_confusion_matrices(cm_data, results_dir / 'confusion_matrices.png')
+        plot_confusion_matrices(cm_data, results_dir / 'confusion_matrices_at_spec.png')
 
     # ── ETAP 4: Histogramy niepewności ────────────────────────────────────
     print("\n" + "─" * 70)

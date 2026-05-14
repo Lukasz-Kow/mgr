@@ -22,6 +22,7 @@ from src.models.backbone import get_backbone
 from src.models.baseline_softmax import BaselineSoftmaxModel # Use as container for EDL head if not using Hybrid class
 from src.models.evidential_layer import EvidentialLayer, EvidentialLoss
 from src.evaluation.metrics import MetricsTracker
+from src.training.optimizations import get_optimized_device, optimize_model_and_optimizer, get_amp_config
 
 # Lightweight container for EDL
 class EDLModel(nn.Module):
@@ -44,9 +45,18 @@ def train():
     
     with open('configs/data_config.yaml', 'r') as f:
         data_cfg = yaml.safe_load(f)
+    
+    # Load evaluation config for target specificity
+    eval_cfg_path = Path('configs/evaluation_config.yaml')
+    if eval_cfg_path.exists():
+        with open(eval_cfg_path, 'r') as f:
+            eval_cfg = yaml.safe_load(f)
+    else:
+        eval_cfg = {'target_specificity': 0.95}
+    target_spec = eval_cfg.get('target_specificity', 0.95)
 
     torch.manual_seed(config['seed'])
-    device = torch.device(config['device'] if torch.cuda.is_available() else 'cpu')
+    device = get_optimized_device(config['device'])
 
     dm = MCIDataModule(
         metadata_csv=config['data']['metadata_csv'],
@@ -71,6 +81,11 @@ def train():
     )
 
     optimizer = torch.optim.Adam(model.parameters(), lr=config['training']['learning_rate'], weight_decay=config['training']['weight_decay'])
+    
+    # Intel Optimization
+    use_amp, amp_dtype = get_amp_config(device)
+    model, optimizer = optimize_model_and_optimizer(model, optimizer, dtype=amp_dtype)
+    
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=config['training']['scheduler']['patience'], factor=config['training']['scheduler']['factor'])
 
     checkpoint_dir = Path(config['checkpoint']['dir'])
@@ -81,9 +96,8 @@ def train():
 
     # Mixed Precision
     scaler = torch.amp.GradScaler('cuda') if device.type == 'cuda' else None
-    use_amp = (scaler is not None)
     if use_amp:
-        print("⚡ Mixed Precision (AMP) enabled")
+        print(f"⚡ Mixed Precision (AMP) enabled (dtype={amp_dtype})")
 
     # Validate every N epochs
     validate_every_n = config['training'].get('validate_every_n', 1)
@@ -101,7 +115,7 @@ def train():
             
             optimizer.zero_grad()
             
-            with torch.amp.autocast('cuda', enabled=use_amp):
+            with torch.amp.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
                 alpha = model(images)
                 loss, loss_dict = criterion(alpha, labels)
             
@@ -126,13 +140,14 @@ def train():
         # Validation
         model.eval()
         val_loss = 0.0
-        tracker = MetricsTracker(num_classes=config['model']['classifier']['num_classes'])
+        tracker = MetricsTracker(num_classes=config['model']['classifier']['num_classes'], target_specificity=target_spec)
         
         with torch.no_grad():
             for images, labels, _ in tqdm(val_loader, desc=f"Epoch {epoch+1} [Val]"):
                 images, labels = images.to(device), labels.to(device)
-                alpha = model(images)
-                loss, _ = criterion(alpha, labels)
+                with torch.amp.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
+                    alpha = model(images)
+                    loss, _ = criterion(alpha, labels)
                 val_loss += loss.item()
                 
                 strength = alpha.sum(dim=1, keepdim=True)
@@ -144,7 +159,9 @@ def train():
         avg_val_loss = val_loss / len(val_loader)
         val_metrics = tracker.compute_all_metrics()
         
-        print(f"Epoch {epoch+1}: Val Loss={avg_val_loss:.4f}, Val Acc={val_metrics['accuracy']:.4f}")
+        ms = val_metrics.get('metrics_at_target_spec', {})
+        print(f"Epoch {epoch+1}: Val Loss={avg_val_loss:.4f}, Val Acc={val_metrics['accuracy']:.4f}, Val Spec={val_metrics.get('specificity', 0):.4f}")
+        print(f"         Sens@{target_spec*100:.0f}%Spec={ms.get('sensitivity', 0):.4f}")
 
         scheduler.step(avg_val_loss)
 

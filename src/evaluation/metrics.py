@@ -116,7 +116,7 @@ def compute_sensitivity_at_specificity(
     probabilities: np.ndarray,
     target_specificity: float = 0.95,
     positive_class: int = 1
-) -> Tuple[float, float]:
+) -> Tuple[float, float, float]:
     """
     Compute sensitivity (TPR) at a fixed specificity (TNR).
     
@@ -126,12 +126,13 @@ def compute_sensitivity_at_specificity(
     Args:
         labels: Ground truth labels
         probabilities: Predicted probabilities for positive class
-        target_specificity: Desired specificity (TPR when negative)
+        target_specificity: Desired specificity (TNR)
         positive_class: Which class is positive
         
     Returns:
         sensitivity: Sensitivity at target specificity
         threshold: Threshold that achieves this operating point
+        actual_specificity: Actual specificity achieved at this threshold
     """
     # Compute ROC curve
     fpr, tpr, thresholds = roc_curve(labels, probabilities, pos_label=positive_class)
@@ -147,6 +148,44 @@ def compute_sensitivity_at_specificity(
     actual_specificity = specificity[idx]
     
     return sensitivity, threshold, actual_specificity
+
+
+def compute_metrics_at_specificity(
+    labels: np.ndarray,
+    probabilities: np.ndarray,
+    target_specificity: float = 0.95,
+    positive_class: int = 1
+) -> Dict[str, float]:
+    """
+    Compute all standard metrics at a specific operating point (fixed specificity).
+    
+    Args:
+        labels: Ground truth labels
+        probabilities: Predicted probabilities for positive class
+        target_specificity: Desired specificity
+        positive_class: Positive class label
+        
+    Returns:
+        metrics: Dictionary with metrics at the selected threshold
+    """
+    sens, threshold, actual_spec = compute_sensitivity_at_specificity(
+        labels, probabilities, target_specificity, positive_class
+    )
+    
+    # Apply threshold to get predictions
+    preds = (probabilities >= threshold).astype(int)
+    
+    # Compute metrics at this threshold
+    metrics = {
+        'threshold': float(threshold),
+        'actual_specificity': float(actual_spec),
+        'sensitivity': float(sens),
+        'accuracy': float(accuracy_score(labels, preds)),
+        'precision': float(precision_score(labels, preds, pos_label=positive_class, zero_division=0)),
+        'f1': float(f1_score(labels, preds, pos_label=positive_class, zero_division=0)),
+    }
+    
+    return metrics
 
 
 def compute_sensitivity_at_multiple_specificities(
@@ -287,6 +326,10 @@ def compute_standard_metrics(
     metrics['recall'] = recall_score(labels, predictions, average='binary', zero_division=0)
     metrics['f1'] = f1_score(labels, predictions, average='binary', zero_division=0)
     
+    # Specificity (TNR)
+    tn, fp, fn, tp = confusion_matrix(labels, predictions, labels=[0, 1]).ravel()
+    metrics['specificity'] = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+    
     # AUC-ROC (if probabilities provided)
     if probabilities is not None:
         if len(np.unique(labels)) > 1:  # Need both classes for AUC
@@ -340,12 +383,14 @@ def compute_confusion_matrix_with_abstention(
 class MetricsTracker:
     """Helper class to track metrics during evaluation."""
     
-    def __init__(self, num_classes: int = 2):
+    def __init__(self, num_classes: int = 2, target_specificity: float = 0.95):
         """
         Args:
             num_classes: Number of classes
+            target_specificity: Specificity level to fix for reporting
         """
         self.num_classes = num_classes
+        self.target_specificity = target_specificity
         self.reset()
     
     def reset(self):
@@ -439,6 +484,12 @@ class MetricsTracker:
             )
             for key, vals in multi_sens.items():
                 metrics[key] = vals['sensitivity']
+            
+            # Compute comprehensive metrics at the TARGET specificity
+            metrics_at_spec = compute_metrics_at_specificity(
+                labels, probs_pos, target_specificity=self.target_specificity
+            )
+            metrics['metrics_at_target_spec'] = metrics_at_spec
             
             # Legacy key for backward compatibility
             metrics['sensitivity_at_95spec'] = multi_sens.get(

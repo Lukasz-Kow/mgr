@@ -27,6 +27,7 @@ from src.data import MCIDataModule
 from src.models.backbone import get_backbone
 from src.models import BaselineSoftmaxModel
 from src.evaluation.metrics import MetricsTracker
+from src.training.optimizations import get_optimized_device, optimize_model_and_optimizer, get_amp_config
 
 
 def load_config(config_path: str) -> dict:
@@ -40,7 +41,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device, epoch, writer, 
     """Train for one epoch with performance timing."""
     model.train()
     running_loss = 0.0
-    use_amp = (scaler is not None and device.type == 'cuda')
+    use_amp, amp_dtype = get_amp_config(device)
     
     # Timing accumulation
     t0 = time.time()
@@ -57,7 +58,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device, epoch, writer, 
         optimizer.zero_grad()
         
         # Forward with AMP
-        with torch.amp.autocast('cuda', enabled=use_amp):
+        with torch.amp.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
             logits = model(images)
             loss = criterion(logits, labels)
         
@@ -94,18 +95,20 @@ def train_epoch(model, dataloader, criterion, optimizer, device, epoch, writer, 
 
 
 @torch.no_grad()
-def validate(model, dataloader, criterion, device):
+def validate(model, dataloader, criterion, device, target_spec=0.95):
     """Validate model."""
     model.eval()
     running_loss = 0.0
-    tracker = MetricsTracker(num_classes=2)
+    tracker = MetricsTracker(num_classes=2, target_specificity=target_spec)
     
     for images, labels, _ in tqdm(dataloader, desc='Validating'):
         images, labels = images.to(device), labels.to(device)
         
         # Forward
-        logits = model(images)
-        loss = criterion(logits, labels)
+        use_amp, amp_dtype = get_amp_config(device)
+        with torch.amp.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
+            logits = model(images)
+            loss = criterion(logits, labels)
         
         # Predictions
         predictions, confidences, probabilities = model.predict_with_confidence(images)
@@ -141,8 +144,17 @@ def main():
     config = load_config(args.config)
     data_config = load_config(args.data_config)
     
+    # Load evaluation config for target specificity
+    eval_cfg_path = Path('configs/evaluation_config.yaml')
+    if eval_cfg_path.exists():
+        with open(eval_cfg_path, 'r') as f:
+            eval_cfg = yaml.safe_load(f)
+    else:
+        eval_cfg = {'target_specificity': 0.95}
+    target_spec = eval_cfg.get('target_specificity', 0.95)
+    
     # Set device and seed
-    device = torch.device(config['device'] if torch.cuda.is_available() else 'cpu')
+    device = get_optimized_device(config['device'])
     torch.manual_seed(config['seed'])
     
     print("="*60)
@@ -204,6 +216,10 @@ def main():
     else:
         raise ValueError(f"Unknown optimizer: {config['training']['optimizer']}")
     
+    # Intel Optimization
+    use_amp, amp_dtype = get_amp_config(device)
+    model, optimizer = optimize_model_and_optimizer(model, optimizer, dtype=amp_dtype)
+    
     # Scheduler
     if config['training']['scheduler']['type'] == 'reduce_on_plateau':
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -258,12 +274,15 @@ def main():
             continue
         
         # Validate
-        val_metrics = validate(model, val_loader, criterion, device)
+        val_metrics = validate(model, val_loader, criterion, device, target_spec=target_spec)
         
         # Log
+        ms = val_metrics.get('metrics_at_target_spec', {})
         print(f"\nTrain Loss: {train_loss:.4f}")
         print(f"Val Loss: {val_metrics['loss']:.4f}")
         print(f"Val Accuracy: {val_metrics['accuracy']:.4f}")
+        print(f"Val Specificity: {val_metrics.get('specificity', 0):.4f}")
+        print(f"Val Sensitivity @ {target_spec*100:.0f}% Spec: {ms.get('sensitivity', 0):.4f}")
         print(f"Val F1: {val_metrics['f1']:.4f}")
         print(f"Val AUC: {val_metrics.get('auc', 0):.4f}")
         

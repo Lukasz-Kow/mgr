@@ -1,0 +1,20 @@
+# Evaluation configuration for MCI classification
+# This file centralizes metrics requirements for the thesis.
+
+# Target Specificity (Swoistość) for clinical operating point
+# Common values: 0.90 or 0.95
+target_specificity: 0.95
+
+# Positive class label (MCI)
+positive_class: 1
+
+# Metrics to report at the fixed specificity operating point
+report_metrics_at_spec:
+  - accuracy
+  - f1
+  - precision
+  - sensitivity
+  - confusion_matrix
+
+# Abstention levels to evaluate for Risk-Coverage
+abstention_levels: [0.1, 0.2, 0.3, 0.5]
