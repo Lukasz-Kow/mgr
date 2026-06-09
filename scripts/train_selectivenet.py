@@ -20,8 +20,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.data import MCIDataModule
 from src.models.backbone import get_backbone
 from src.models.selective_net import SelectiveNet, SelectiveNetLoss
-from src.evaluation.metrics import MetricsTracker
+from src.training.eval_utils import (
+    load_evaluation_config,
+    create_metrics_tracker,
+    get_monitor_value,
+    format_validation_log,
+)
 from src.training.optimizations import get_optimized_device, optimize_model_and_optimizer, get_amp_config
+from src.training.fine_tune import (
+    setup_fine_tune_for_epoch,
+    build_optimizer_param_groups,
+    should_count_early_stopping,
+)
 
 def train():
     parser = argparse.ArgumentParser(description='Train SelectiveNet Model')
@@ -34,14 +44,9 @@ def train():
     with open('configs/data_config.yaml', 'r') as f:
         data_cfg = yaml.safe_load(f)
     
-    # Load evaluation config for target specificity
-    eval_cfg_path = Path('configs/evaluation_config.yaml')
-    if eval_cfg_path.exists():
-        with open(eval_cfg_path, 'r') as f:
-            eval_cfg = yaml.safe_load(f)
-    else:
-        eval_cfg = {'target_specificity': 0.95}
+    eval_cfg = load_evaluation_config()
     target_spec = eval_cfg.get('target_specificity', 0.95)
+    selection_threshold = config['selective_net'].get('selection_threshold', 0.5)
 
     torch.manual_seed(config['seed'])
     device = get_optimized_device(config['device'])
@@ -52,7 +57,8 @@ def train():
         batch_size=config['training']['batch_size'],
         num_workers=data_cfg['dataloader']['num_workers'],
         augmentation_config=data_cfg,
-        cache_dir='cache/selective_net'
+        cache_dir='cache/selective_net',
+        balance_classes=data_cfg['dataloader'].get('balance_classes', False)
     )
 
     train_loader = dm.train_dataloader()
@@ -66,6 +72,11 @@ def train():
         selection_dropout=config['model']['classifier']['selection_dropout']
     ).to(device)
 
+    freeze_epochs = config.get('model', {}).get('fine_tune', {}).get('freeze_encoder_epochs', 0)
+    if freeze_epochs > 0:
+        setup_fine_tune_for_epoch(model, config, 1)
+        print(f"Fine-tune: encoder frozen for epochs 1–{freeze_epochs}")
+
     criterion = SelectiveNetLoss(
         target_coverage=config['selective_net']['target_coverage'],
         alpha=config['selective_net'].get('alpha', 0.5),
@@ -73,19 +84,27 @@ def train():
         coverage_penalty=config['selective_net']['coverage_penalty']
     )
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=config['training']['learning_rate'], weight_decay=config['training']['weight_decay'])
-    
+    def _make_optimizer():
+        lr = config['training']['learning_rate']
+        wd = config['training']['weight_decay']
+        groups = build_optimizer_param_groups(model, config, lr, wd)
+        return torch.optim.Adam(groups, weight_decay=wd)
+
+    optimizer = _make_optimizer()
+
     # Intel Optimization
     use_amp, amp_dtype = get_amp_config(device)
-    model, optimizer = optimize_model_and_optimizer(model, optimizer, dtype=amp_dtype)
+    model, optimizer = optimize_model_and_optimizer(model, optimizer, dtype=amp_dtype, device=device)
     
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=config['training']['scheduler']['patience'], factor=config['training']['scheduler']['factor'])
 
     checkpoint_dir = Path(config['checkpoint']['dir'])
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    best_val_loss = float('inf')
+    monitor_mode = config['checkpoint'].get('mode', 'min')
+    best_val_metric = float('inf') if monitor_mode == 'min' else float('-inf')
     early_stop_counter = 0
+    stop_reason = "Not started"
 
     # Mixed Precision
     scaler = torch.amp.GradScaler('cuda') if device.type == 'cuda' else None
@@ -98,6 +117,13 @@ def train():
     print(f"\nStarting SelectiveNet training...")
     
     for epoch in range(config['training']['epochs']):
+        epoch_num = epoch + 1
+        if freeze_epochs > 0 and epoch_num == freeze_epochs + 1:
+            setup_fine_tune_for_epoch(model, config, epoch_num)
+            optimizer = _make_optimizer()
+            model, optimizer = optimize_model_and_optimizer(model, optimizer, dtype=amp_dtype, device=device)
+            print(f"Fine-tune: encoder unfrozen from epoch {epoch_num}")
+
         model.train()
         train_loss = 0.0
         
@@ -105,7 +131,7 @@ def train():
         for images, labels, _ in pbar:
             images, labels = images.to(device), labels.to(device)
             
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             
             with torch.amp.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
                 pred_logits, selection_probs, aux_logits = model(images, return_selection=True, return_auxiliary=True)
@@ -132,7 +158,9 @@ def train():
         # Validation
         model.eval()
         val_loss = 0.0
-        tracker = MetricsTracker(num_classes=config['model']['classifier']['num_classes'], target_specificity=target_spec)
+        tracker = create_metrics_tracker(
+            eval_cfg, num_classes=config['model']['classifier']['num_classes']
+        )
         
         with torch.no_grad():
             for images, labels, _ in tqdm(val_loader, desc=f"Epoch {epoch+1} [Val]"):
@@ -143,27 +171,43 @@ def train():
                 val_loss += loss.item()
                 
                 probs = torch.softmax(pred_logits, dim=1)
-                preds = torch.argmax(probs, dim=1)
-                tracker.update(preds, labels, confidences=selection_probs, probabilities=probs)
+                preds, _, sel_probs, _ = model.predict_with_selection(
+                    images, threshold=selection_threshold
+                )
+                tracker.update(preds, labels, confidences=sel_probs, probabilities=probs)
 
         avg_val_loss = val_loss / len(val_loader)
         val_metrics = tracker.compute_all_metrics()
+        val_metrics['loss'] = avg_val_loss
         
-        ms = val_metrics.get('metrics_at_target_spec', {})
-        print(f"Epoch {epoch+1}: Val Loss={avg_val_loss:.4f}, Val Acc={val_metrics['accuracy']:.4f}, Val Spec={val_metrics.get('specificity', 0):.4f}, Cov={val_metrics['abstention_rate']:.4f}")
-        print(f"         Sens@{target_spec*100:.0f}%Spec={ms.get('sensitivity', 0):.4f}")
+        print(f"Epoch {epoch+1}: Val Loss={avg_val_loss:.4f}, Val Acc={val_metrics['accuracy']:.4f}")
+        print(f"         {format_validation_log(val_metrics, target_spec)}")
 
         scheduler.step(avg_val_loss)
 
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            torch.save({'model_state_dict': model.state_dict()}, checkpoint_dir / 'best_model.pt')
-            early_stop_counter = 0
+        # Checkpointing and Early stopping
+        val_metric = get_monitor_value(val_metrics, config['checkpoint']['monitor'])
+        
+        if monitor_mode == 'min':
+            is_best = val_metric < best_val_metric
         else:
+            is_best = val_metric > best_val_metric
+
+        if is_best:
+            best_val_metric = val_metric
+            torch.save({
+                'epoch': epoch + 1,
+                'model_state_dict': model.state_dict(),
+                'val_metrics': val_metrics,
+                'config': config
+            }, checkpoint_dir / 'best_model.pt')
+            print(f"✓ Saved best model to {checkpoint_dir / 'best_model.pt'}")
+            early_stop_counter = 0
+        elif should_count_early_stopping(config, epoch_num):
             early_stop_counter += 1
-            if early_stop_counter >= config['training']['early_stopping']['patience']:
+            if config['training']['early_stopping'].get('enabled', True) and early_stop_counter >= config['training']['early_stopping']['patience']:
                 print(f"\n🛑 STOP: Early stopping triggered at epoch {epoch+1}.")
-                print(f"   Metric 'val_loss' stopped improving for {config['training']['early_stopping']['patience']} epochs.")
+                print(f"   Metric '{config['checkpoint']['monitor']}' stopped improving for {config['training']['early_stopping']['patience']} epochs.")
                 stop_reason = "Early Stopping"
                 break
         
@@ -173,7 +217,7 @@ def train():
     print("\n" + "="*60)
     print(f"✅ SELECTIVENET TRAINING FINISHED")
     print(f"   Reason: {stop_reason}")
-    print(f"   Best Val Loss: {best_val_loss:.4f}")
+    print(f"   Best {config['checkpoint']['monitor']}: {best_val_metric:.4f}")
     print(f"   Final Epoch: {epoch+1}")
     print("="*60)
     print(f"Model saved to: {checkpoint_dir / 'best_model.pt'}")

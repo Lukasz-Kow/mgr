@@ -1,47 +1,36 @@
-# Hybrid 3D-ResNet-EDL Configuration (Phase 2: MONAI + MedicalNet)
+# Evidential (EDL) Phase 1 (simple 3D CNN) — for evaluation comparison only
 
 model:
   backbone:
-    type: monai
+    type: simple
     use_3d: true
-    arch_3d: 'resnet10'
-    pretrained: medicalnet
+    arch_3d: 'resnet3d_18'
+    pretrained: false
     in_channels: 1
-    shortcut_type: B
-    bias_downsample: false
-
   classifier:
     dropout: 0.6
     num_classes: 2
 
-  fine_tune:
-    freeze_encoder_epochs: 3
-    encoder_lr: 0.00001
-    head_lr: 0.0001
-
 evidential:
   kl_weight: 1.0
   kl_anneal_start: 0
-  kl_anneal_end: 40
+  kl_anneal_end: 30
   uncertainty_type: 'epistemic'
 
 training:
-  epochs: 150
+  epochs: 120
   batch_size: 1
-  learning_rate: 0.0001
+  learning_rate: 0.00005
   weight_decay: 0.001
-  warmup_epochs: 8
-
-  optimizer: 'adamw'
-
+  optimizer: 'adam'
   scheduler:
-    type: 'cosine'
-    t_max: 150
+    type: 'reduce_on_plateau'
+    patience: 5
+    factor: 0.5
     min_lr: 0.000001
-
   early_stopping:
     enabled: true
-    patience: 30
+    patience: 10
     metric: 'val_sensitivity_at_target_spec'
     mode: 'max'
 
@@ -49,13 +38,13 @@ data:
   metadata_csv: 'data_metadata_adni.csv'
 
 checkpoint:
-  dir: 'checkpoints/hybrid_monai'
+  dir: 'checkpoints/evidential'
   save_best_only: true
   monitor: 'val_sensitivity_at_target_spec'
   mode: 'max'
 
 logging:
-  tensorboard_dir: 'runs/hybrid_monai'
+  tensorboard_dir: 'runs/evidential'
   log_interval: 10
   save_predictions: true
 

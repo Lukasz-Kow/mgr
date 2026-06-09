@@ -26,8 +26,18 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from src.data import MCIDataModule
 from src.models.backbone import get_backbone
 from src.models import BaselineSoftmaxModel
-from src.evaluation.metrics import MetricsTracker
+from src.training.eval_utils import (
+    load_evaluation_config,
+    create_metrics_tracker,
+    get_monitor_value,
+    format_validation_log,
+)
 from src.training.optimizations import get_optimized_device, optimize_model_and_optimizer, get_amp_config
+from src.training.fine_tune import (
+    setup_fine_tune_for_epoch,
+    build_optimizer_param_groups,
+    should_count_early_stopping,
+)
 
 
 def load_config(config_path: str) -> dict:
@@ -55,7 +65,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device, epoch, writer, 
         
         images, labels = images.to(device), labels.to(device)
         
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         
         # Forward with AMP
         with torch.amp.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
@@ -95,11 +105,11 @@ def train_epoch(model, dataloader, criterion, optimizer, device, epoch, writer, 
 
 
 @torch.no_grad()
-def validate(model, dataloader, criterion, device, target_spec=0.95):
+def validate(model, dataloader, criterion, device, eval_cfg):
     """Validate model."""
     model.eval()
     running_loss = 0.0
-    tracker = MetricsTracker(num_classes=2, target_specificity=target_spec)
+    tracker = create_metrics_tracker(eval_cfg, num_classes=2)
     
     for images, labels, _ in tqdm(dataloader, desc='Validating'):
         images, labels = images.to(device), labels.to(device)
@@ -144,13 +154,7 @@ def main():
     config = load_config(args.config)
     data_config = load_config(args.data_config)
     
-    # Load evaluation config for target specificity
-    eval_cfg_path = Path('configs/evaluation_config.yaml')
-    if eval_cfg_path.exists():
-        with open(eval_cfg_path, 'r') as f:
-            eval_cfg = yaml.safe_load(f)
-    else:
-        eval_cfg = {'target_specificity': 0.95}
+    eval_cfg = load_evaluation_config()
     target_spec = eval_cfg.get('target_specificity', 0.95)
     
     # Set device and seed
@@ -172,7 +176,8 @@ def main():
         batch_size=config['training']['batch_size'],
         num_workers=data_config['dataloader']['num_workers'],
         augmentation_config=data_config,
-        cache_dir='cache/baseline'
+        cache_dir='cache/baseline',
+        balance_classes=data_config['dataloader'].get('balance_classes', False)
     )
     
     train_loader = data_module.train_dataloader()
@@ -188,10 +193,17 @@ def main():
         dropout=config['model']['classifier']['dropout']
     ).to(device)
     
-    arch_name = config['model']['backbone'].get('arch_3d', 'resnet3d_18') if config['model']['backbone'].get('use_3d', True) else config['model']['backbone'].get('arch_2d', 'resnet18')
-    print(f"Model architecture: {arch_name} ({'3D' if config['model']['backbone'].get('use_3d', True) else '2D'})")
+    bb_cfg = config['model']['backbone']
+    bb_type = bb_cfg.get('type', 'simple')
+    arch_name = bb_cfg.get('arch_3d', 'resnet3d_18') if bb_cfg.get('use_3d', True) else bb_cfg.get('arch_2d', 'resnet18')
+    print(f"Model architecture: {arch_name} ({bb_type}, {'3D' if bb_cfg.get('use_3d', True) else '2D'})")
     print(f"Total parameters: {sum(p.numel() for p in model.parameters()):,}")
-    
+
+    freeze_epochs = config.get('model', {}).get('fine_tune', {}).get('freeze_encoder_epochs', 0)
+    if freeze_epochs > 0:
+        setup_fine_tune_for_epoch(model, config, 1)
+        print(f"Fine-tune: encoder frozen for epochs 1–{freeze_epochs}")
+
     # Loss function
     if config['training']['use_class_weights']:
         class_weights = data_module.get_class_weights().to(device)
@@ -200,25 +212,21 @@ def main():
     else:
         criterion = nn.CrossEntropyLoss()
     
-    # Optimizer
-    if config['training']['optimizer'] == 'adam':
-        optimizer = torch.optim.Adam(
-            model.parameters(),
-            lr=config['training']['learning_rate'],
-            weight_decay=config['training']['weight_decay']
-        )
-    elif config['training']['optimizer'] == 'adamw':
-        optimizer = torch.optim.AdamW(
-            model.parameters(),
-            lr=config['training']['learning_rate'],
-            weight_decay=config['training']['weight_decay']
-        )
-    else:
+    def _make_optimizer():
+        lr = config['training']['learning_rate']
+        wd = config['training']['weight_decay']
+        groups = build_optimizer_param_groups(model, config, lr, wd)
+        if config['training']['optimizer'] == 'adam':
+            return torch.optim.Adam(groups, weight_decay=wd)
+        if config['training']['optimizer'] == 'adamw':
+            return torch.optim.AdamW(groups, weight_decay=wd)
         raise ValueError(f"Unknown optimizer: {config['training']['optimizer']}")
+
+    optimizer = _make_optimizer()
     
     # Intel Optimization
     use_amp, amp_dtype = get_amp_config(device)
-    model, optimizer = optimize_model_and_optimizer(model, optimizer, dtype=amp_dtype)
+    model, optimizer = optimize_model_and_optimizer(model, optimizer, dtype=amp_dtype, device=device)
     
     # Scheduler
     if config['training']['scheduler']['type'] == 'reduce_on_plateau':
@@ -246,8 +254,10 @@ def main():
     print("\n🚀 Starting training...")
     print("="*60)
     
-    best_val_metric = float('inf')
+    monitor_mode = config['checkpoint'].get('mode', 'min')
+    best_val_metric = float('inf') if monitor_mode == 'min' else float('-inf')
     patience_counter = 0
+    stop_reason = "Not started"
     
     # Mixed Precision scaler (only effective on CUDA)
     scaler = torch.amp.GradScaler('cuda') if device.type == 'cuda' else None
@@ -259,7 +269,13 @@ def main():
     
     for epoch in range(1, config['training']['epochs'] + 1):
         print(f"\nEpoch {epoch}/{config['training']['epochs']}")
-        
+
+        if freeze_epochs > 0 and epoch == freeze_epochs + 1:
+            setup_fine_tune_for_epoch(model, config, epoch)
+            optimizer = _make_optimizer()
+            model, optimizer = optimize_model_and_optimizer(model, optimizer, dtype=amp_dtype, device=device)
+            print(f"Fine-tune: encoder unfrozen from epoch {epoch}")
+
         # Train
         train_loss = train_epoch(
             model, train_loader, criterion, optimizer, device,
@@ -274,22 +290,21 @@ def main():
             continue
         
         # Validate
-        val_metrics = validate(model, val_loader, criterion, device, target_spec=target_spec)
+        val_metrics = validate(model, val_loader, criterion, device, eval_cfg)
         
         # Log
-        ms = val_metrics.get('metrics_at_target_spec', {})
         print(f"\nTrain Loss: {train_loss:.4f}")
         print(f"Val Loss: {val_metrics['loss']:.4f}")
         print(f"Val Accuracy: {val_metrics['accuracy']:.4f}")
-        print(f"Val Specificity: {val_metrics.get('specificity', 0):.4f}")
-        print(f"Val Sensitivity @ {target_spec*100:.0f}% Spec: {ms.get('sensitivity', 0):.4f}")
         print(f"Val F1: {val_metrics['f1']:.4f}")
         print(f"Val AUC: {val_metrics.get('auc', 0):.4f}")
+        print(format_validation_log(val_metrics, target_spec))
         
         # TensorBoard
         writer.add_scalar('Train/Epoch_Loss', train_loss, epoch)
         writer.add_scalar('Val/Loss', val_metrics['loss'], epoch)
         writer.add_scalar('Val/Accuracy', val_metrics['accuracy'], epoch)
+        writer.add_scalar('Val/Balanced_Accuracy', val_metrics.get('balanced_accuracy', 0), epoch)
         writer.add_scalar('Val/F1', val_metrics['f1'], epoch)
         if 'auc' in val_metrics:
             writer.add_scalar('Val/AUC', val_metrics['auc'], epoch)
@@ -300,8 +315,12 @@ def main():
             writer.add_scalar('Train/LR', optimizer.param_groups[0]['lr'], epoch)
         
         # Checkpointing
-        val_metric = val_metrics[config['checkpoint']['monitor'].replace('val_', '')]
-        is_best = val_metric < best_val_metric
+        val_metric = get_monitor_value(val_metrics, config['checkpoint']['monitor'])
+        
+        if monitor_mode == 'min':
+            is_best = val_metric < best_val_metric
+        else:
+            is_best = val_metric > best_val_metric
         
         if is_best:
             best_val_metric = val_metric
@@ -317,11 +336,11 @@ def main():
                     'config': config
                 }, checkpoint_path)
                 print(f"✅ Saved best model: {checkpoint_path}")
-        else:
+        elif should_count_early_stopping(config, epoch):
             patience_counter += 1
-        
+
         # Early stopping
-        if config['training']['early_stopping']['enabled']:
+        if config['training']['early_stopping']['enabled'] and should_count_early_stopping(config, epoch):
             if patience_counter >= config['training']['early_stopping']['patience']:
                 print(f"\n🛑 STOP: Early stopping triggered at epoch {epoch}.")
                 print(f"   Metric '{config['checkpoint']['monitor']}' stopped improving for {config['training']['early_stopping']['patience']} epochs.")

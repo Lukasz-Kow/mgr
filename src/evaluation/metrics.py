@@ -188,6 +188,40 @@ def compute_metrics_at_specificity(
     return metrics
 
 
+def fit_threshold_at_specificity(
+    labels: np.ndarray,
+    probabilities: np.ndarray,
+    target_specificity: float = 0.80,
+    positive_class: int = 1,
+) -> float:
+    """Return probability threshold achieving ~target specificity on given split."""
+    _, threshold, _ = compute_sensitivity_at_specificity(
+        labels, probabilities, target_specificity, positive_class
+    )
+    return float(threshold)
+
+
+def metrics_with_fixed_threshold(
+    labels: np.ndarray,
+    probabilities: np.ndarray,
+    threshold: float,
+    positive_class: int = 1,
+) -> Dict[str, float]:
+    """Compute metrics using a pre-fitted threshold (val→test protocol)."""
+    preds = (probabilities >= threshold).astype(int)
+    tn, fp, fn, tp = confusion_matrix(labels, preds, labels=[0, 1]).ravel()
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+    sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    return {
+        'threshold': float(threshold),
+        'actual_specificity': float(specificity),
+        'sensitivity': float(sensitivity),
+        'accuracy': float(accuracy_score(labels, preds)),
+        'precision': float(precision_score(labels, preds, pos_label=positive_class, zero_division=0)),
+        'f1': float(f1_score(labels, preds, pos_label=positive_class, zero_division=0)),
+    }
+
+
 def compute_sensitivity_at_multiple_specificities(
     labels: np.ndarray,
     probabilities: np.ndarray,
@@ -330,6 +364,9 @@ def compute_standard_metrics(
     tn, fp, fn, tp = confusion_matrix(labels, predictions, labels=[0, 1]).ravel()
     metrics['specificity'] = tn / (tn + fp) if (tn + fp) > 0 else 0.0
     
+    # Balanced Accuracy
+    metrics['balanced_accuracy'] = (metrics['recall'] + metrics['specificity']) / 2.0
+    
     # AUC-ROC (if probabilities provided)
     if probabilities is not None:
         if len(np.unique(labels)) > 1:  # Need both classes for AUC
@@ -383,14 +420,27 @@ def compute_confusion_matrix_with_abstention(
 class MetricsTracker:
     """Helper class to track metrics during evaluation."""
     
-    def __init__(self, num_classes: int = 2, target_specificity: float = 0.95):
+    def __init__(
+        self,
+        num_classes: int = 2,
+        target_specificity: float = 0.95,
+        positive_class: int = 1,
+        abstention_levels: Optional[List[float]] = None,
+        report_specificities: Optional[List[float]] = None,
+    ):
         """
         Args:
             num_classes: Number of classes
             target_specificity: Specificity level to fix for reporting
+            positive_class: Label of the positive class (MCI=1)
+            abstention_levels: Fractions of samples to reject for FP reduction
+            report_specificities: Specificity levels for multi-point reporting
         """
         self.num_classes = num_classes
         self.target_specificity = target_specificity
+        self.positive_class = positive_class
+        self.abstention_levels = abstention_levels or [0.10, 0.20, 0.30]
+        self.report_specificities = report_specificities or [0.80, 0.90, 1.0]
         self.reset()
     
     def reset(self):
@@ -480,30 +530,35 @@ class MetricsTracker:
             # Multi-threshold sensitivity
             multi_sens = compute_sensitivity_at_multiple_specificities(
                 labels, probs_pos,
-                target_specificities=[0.80, 0.90, 0.95]
+                target_specificities=self.report_specificities,
+                positive_class=self.positive_class,
             )
             for key, vals in multi_sens.items():
                 metrics[key] = vals['sensitivity']
+            if 'sens_at_100spec' in multi_sens:
+                metrics['sens_at_100spec'] = multi_sens['sens_at_100spec']['sensitivity']
             
             # Compute comprehensive metrics at the TARGET specificity
             metrics_at_spec = compute_metrics_at_specificity(
-                labels, probs_pos, target_specificity=self.target_specificity
+                labels, probs_pos,
+                target_specificity=self.target_specificity,
+                positive_class=self.positive_class,
             )
             metrics['metrics_at_target_spec'] = metrics_at_spec
+            metrics['sensitivity_at_target_spec'] = metrics_at_spec['sensitivity']
+            metrics['specificity_at_target_spec'] = metrics_at_spec['actual_specificity']
             
-            # Legacy key for backward compatibility
-            metrics['sensitivity_at_95spec'] = multi_sens.get(
-                'sens_at_95spec', {}).get('sensitivity', 0.0)
-            metrics['threshold_at_95spec'] = multi_sens.get(
-                'sens_at_95spec', {}).get('threshold', 0.0)
-            metrics['actual_specificity'] = multi_sens.get(
-                'sens_at_95spec', {}).get('actual_specificity', 0.0)
+            target_key = f"sens_at_{int(self.target_specificity * 100)}spec"
+            legacy = multi_sens.get(target_key, {})
+            metrics['sensitivity_at_95spec'] = legacy.get('sensitivity', 0.0)
+            metrics['threshold_at_95spec'] = legacy.get('threshold', 0.0)
+            metrics['actual_specificity'] = legacy.get('actual_specificity', 0.0)
         
         # FP Reduction at various abstention levels
         if confidences is not None:
             fp_reduction = compute_fp_reduction_at_abstention(
                 predictions, labels, confidences,
-                abstention_levels=[0.10, 0.20, 0.30]
+                abstention_levels=self.abstention_levels,
             )
             metrics['fp_reduction'] = fp_reduction
         

@@ -2,7 +2,7 @@
 
 Hybrydowy model 3D-CNN wykorzystujący uczenie ewidencyjne (Evidential Learning) i mechanizm selektywnej predykcji do klasyfikacji MCI (Mild Cognitive Impairment) vs CN (Cognitive Normal).
 
-## 📋 Opis Projektu
+## Opis Projektu
 
 Projekt realizuje porównanie różnych metod selektywnej predykcji w diagnostyce medycznej:
 1. **Baseline**: Softmax Response z progowaniem
@@ -10,7 +10,7 @@ Projekt realizuje porównanie różnych metod selektywnej predykcji w diagnostyc
 3. **Evidential Deep Learning**: Kwantyfikacja niepewności przez rozkład Dirichleta
 4. **Hybrid**: 3D-ResNet-EDL łączący zalety deep features i evidential heads
 
-## 🗂️ Struktura Projektu
+## Struktura Projektu
 
 ```
 mgr/
@@ -22,84 +22,133 @@ mgr/
 │   └── visualization/     # Plotting i wykresy
 ├── configs/               # Pliki konfiguracyjne YAML
 ├── scripts/               # Skrypty treningowe i ewaluacyjne
-├── tests/                 # Unit testy
-├── docs/                  # Dokumentacja
-├── Alzheimer_MRI_4_classes_dataset/  # Dataset (nie w repo)
-├── environment.yml        # Conda environment
-└── requirements.txt       # Pip requirements
+├── docs/                  # Dokumentacja pracy
+├── environment.yml        # Conda environment (nazwa: mgr)
+└── run_windows.ps1        # Uruchamianie na Windows bez WSL
 ```
 
-## 🚀 Instalacja
+## Instalacja — Windows (bez WSL, zalecane)
 
-### Opcja 1: Conda (Zalecane)
-```bash
+### Wymagania
+- Windows 10/11
+- Miniconda/Anaconda z środowiskiem `mgr`
+- NVIDIA GPU z obsługą CUDA (np. GTX 1050)
+- Dane ADNI w `Data baseline/ADNI/`
+
+### 1. Środowisko Conda
+
+```powershell
 conda env create -f environment.yml
-conda activate mci_classification
+conda activate mgr
 ```
 
-### Opcja 2: Pip
-```bash
-python -m venv venv
-source venv/bin/activate  # Windows: venv\\Scripts\\activate
+Jeśli środowisko `mgr` już istnieje, zaktualizuj pakiety:
+```powershell
+conda activate mgr
 pip install -r requirements.txt
 ```
 
-## 📊 Dataset
+### 2. Jednorazowa konfiguracja PowerShell
 
-Projekt używa zbioru danych Alzheimer MRI z 4 klasami:
-- **NonDemented** → CN (Cognitive Normal)
-- **VeryMildDemented** + **MildDemented** → MCI
-- **ModerateDemented** → Wykluczony z klasyfikacji binarnej
+Wyłącz aliasy Pythona ze Sklepu Microsoft (Ustawienia → Aliasy wykonywania aplikacji → wyłącz `python.exe`).
 
-Dataset powinien być umieszczony w `Alzheimer_MRI_4_classes_dataset/`.
+Zainicjalizuj conda w PowerShell:
+```powershell
+& "C:\Users\Lukas\miniconda3\Scripts\conda.exe" init powershell
+```
+Zrestartuj terminal, potem: `conda activate mgr`
 
-## 🔧 Użycie
+### 3. Weryfikacja
 
-### Preprocessing i Mapowanie Klas
-```bash
-python scripts/prepare_dataset.py --config configs/data_config.yaml
+```powershell
+cd C:\Users\Lukas\mgr
+.\run_windows.ps1 -Verify
 ```
 
-### Trening Modeli
-```bash
-# Baseline (Softmax Response)
-python scripts/train_baseline.py --config configs/baseline_config.yaml
+### 4. Pełny potok
 
-# SelectiveNet
-python scripts/train_selectivenet.py --config configs/selectivenet_config.yaml
-
-# Evidential Deep Learning
-python scripts/train_evidential.py --config configs/evidential_config.yaml
-
-# Hybrid Model (3D-ResNet-EDL)
-python scripts/train_hybrid.py --config configs/hybrid_config.yaml
+```powershell
+.\run_windows.ps1 -PrepareData
+.\run_windows.ps1 -TrainAll
+.\run_windows.ps1 -Evaluate
 ```
 
-### Ewaluacja i Porównanie
-```bash
-# Wygenerowanie wspólnego wykresu Risk-Coverage dla wszystkich modeli
-python src/visualization/plot_curves.py
+Opcja czystego retreningu (usuwa checkpointy):
+```powershell
+.\run_windows.ps1 -Clean -PrepareData -TrainAll
+```
 
-# Finalne zestawienie metryk (Accuracy, AUGRC, Sens@95%Spec)
+### Faza 2 — MONAI ResNet3D-10 + MedicalNet (wszystkie 4 modele)
+
+Faza 2 podmienia backbone na MONAI ResNet3D-10 z wagami MedicalNet (transfer learning z MRI). Checkpointy Fazy 1 pozostają w `checkpoints/baseline`, `selective_net`, `evidential`, `hybrid`; Faza 2 zapisuje do `checkpoints/*_monai`.
+
+```powershell
+pip install monai huggingface_hub
+python scripts/verify_monai_backbone.py
+
+# Retrening wszystkich 4 modeli MONAI (~10-14 h na GTX 1050)
+.\run_windows.ps1 -Phase2 -TrainAll -Clean
+
+# Ewaluacja porównawcza Faza 1 vs Faza 2 (8 wierszy w tabeli)
+.\run_windows.ps1 -Phase2 -Evaluate
+# lub: python scripts/evaluate_all.py --include-phase2
+```
+
+Wagi MedicalNet są pobierane z HuggingFace (`TencentMedicalNet/MedicalNet-Resnet10`) i cache'owane w `~/.cache/huggingface`. Przy braku internetu można ręcznie umieścić `resnet_10_23dataset.pth` w cache HF.
+
+## Dataset
+
+Projekt używa podzbioru ADNI (MCI vs CN):
+- Dane obrazowe: `Data baseline/ADNI/`
+- Etykiety: `Data_baseline_2_23_2026.csv`
+- Metadane (generowane): `data_metadata_adni.csv`
+
+```powershell
+python scripts/prepare_adni_dataset.py
+```
+
+## Trening Modeli
+
+Checkpoint wybierany po **Sens@80%Spec** (czułość przy ustalonej specyficzności).
+
+```powershell
+conda activate mgr
+python scripts/train_baseline.py
+python scripts/train_selectivenet.py
+python scripts/train_evidential.py
+python scripts/train_hybrid.py
+```
+
+Lub automatycznie (tylko brakujące modele):
+```powershell
+python scripts/check_and_train_all.py
+```
+
+**Uwaga:** `batch_size: 1` w configach — dostosowane do GTX 1050 (4 GB VRAM).
+
+## Ewaluacja
+
+```powershell
 python scripts/evaluate_all.py
 ```
 
-## 📈 Metryki
+Wyniki trafiają do `results/` (tabela, krzywe ROC, Risk-Coverage).
 
-Projekt implementuje następujące metryki zgodnie z wymaganiami:
-- **Risk-Coverage Curve**: Ryzyko vs pokrycie
-- **AUGRC**: Area Under Generalized Risk-Coverage curve
-- **Sensitivity @ Fixed Specificity**: Czułość przy TNR=95%
-- Standard: Accuracy, Precision, Recall, F1, AUC-ROC
+## Metryki (SMART / Measurable)
 
-## 📚 Literatura
+- **Sensitivity @ 80% Specificity** — główna metryka kliniczna (protokół val→test)
+- **AUGRC** — Area Under Generalized Risk-Coverage curve
+- **Coverage** — pokrycie (udział nie-abstencji)
+- Risk-Coverage, FP reduction, AUC-ROC
+
+## Literatura
 
 - Wen, J., et al. (2020). "Convolutional neural networks for classification of Alzheimer's disease"
-- Geifman, Y., & El-Yaniv, R. (2019). "SelectiveNet: A Deep Neural Network with an Integrated Reject Option"
-- Sensoy, M., et al. (2018). "Evidential Deep Learning to Quantify Classification Uncertainty"
+- Geifman, Y., & El-Yaniv, R. (2019). "SelectiveNet"
+- Sensoy, M., et al. (2018). "Evidential Deep Learning"
 
-## 🧪 Testy
+## Testy
 
-```bash
+```powershell
 pytest tests/ -v
 ```

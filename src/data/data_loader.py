@@ -10,6 +10,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from typing import Optional, Tuple, Dict
 from pathlib import Path
+import numpy as np
 
 from .preprocessing import MRIPreprocessor, AugmentationPipeline
 
@@ -126,7 +127,8 @@ class MCIDataModule:
         batch_size: int = 16,
         num_workers: int = -1,
         augmentation_config: Optional[dict] = None,
-        cache_dir: Optional[str] = 'cache/preprocessed'
+        cache_dir: Optional[str] = 'cache/preprocessed',
+        balance_classes: bool = False
     ):
         """
         Args:
@@ -136,10 +138,12 @@ class MCIDataModule:
             num_workers: Liczba workerów (-1 = auto-detect)
             augmentation_config: Config dla augmentacji (tylko train)
             cache_dir: Directory for caching preprocessed tensors (None = disabled)
+            balance_classes: Whether to balance training classes
         """
         self.metadata_csv = metadata_csv
         self.batch_size = batch_size
         self.cache_dir = cache_dir
+        self.balance_classes = balance_classes
         
         # Auto-detect optimal num_workers
         if num_workers < 0:
@@ -207,33 +211,73 @@ class MCIDataModule:
     
     def train_dataloader(self, shuffle: bool = True) -> DataLoader:
         """Create train DataLoader."""
-        return DataLoader(
-            self.train_dataset(),
-            batch_size=self.batch_size,
-            shuffle=shuffle,
-            num_workers=self.num_workers,
-            pin_memory=True,
-            drop_last=True  # Drop last incomplete batch for stable training
-        )
+        kwargs = {}
+        if self.num_workers > 0:
+            kwargs['persistent_workers'] = True
+            kwargs['prefetch_factor'] = 2
+
+        if self.balance_classes:
+            print("⚖️ Using WeightedRandomSampler to balance classes in training DataLoader.")
+            train_df = self.metadata_df[self.metadata_df['split'] == 'train']
+            labels = train_df['label'].values
+            class_counts = np.bincount(labels)
+            class_weights = 1.0 / class_counts
+            sample_weights = class_weights[labels]
+            sampler = torch.utils.data.WeightedRandomSampler(
+                weights=sample_weights,
+                num_samples=len(sample_weights),
+                replacement=True
+            )
+            return DataLoader(
+                self.train_dataset(),
+                batch_size=self.batch_size,
+                sampler=sampler,
+                num_workers=self.num_workers,
+                pin_memory=True,
+                drop_last=True,  # Drop last incomplete batch for stable training
+                **kwargs
+            )
+        else:
+            return DataLoader(
+                self.train_dataset(),
+                batch_size=self.batch_size,
+                shuffle=shuffle,
+                num_workers=self.num_workers,
+                pin_memory=True,
+                drop_last=True,  # Drop last incomplete batch for stable training
+                **kwargs
+            )
     
     def val_dataloader(self) -> DataLoader:
         """Create validation DataLoader."""
+        kwargs = {}
+        if self.num_workers > 0:
+            kwargs['persistent_workers'] = True
+            kwargs['prefetch_factor'] = 2
+
         return DataLoader(
             self.val_dataset(),
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
-            pin_memory=True
+            pin_memory=True,
+            **kwargs
         )
     
     def test_dataloader(self) -> DataLoader:
         """Create test DataLoader."""
+        kwargs = {}
+        if self.num_workers > 0:
+            kwargs['persistent_workers'] = True
+            kwargs['prefetch_factor'] = 2
+
         return DataLoader(
             self.test_dataset(),
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
-            pin_memory=True
+            pin_memory=True,
+            **kwargs
         )
     
     def get_class_weights(self) -> torch.Tensor:

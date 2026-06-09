@@ -24,12 +24,19 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.data import MCIDataModule
-from src.models.backbone import get_backbone, ResNetBackbone2D
+from src.models.backbone import get_backbone, ResNetBackbone2D, is_monai_state_dict
 from src.models.baseline_softmax import BaselineSoftmaxModel
 from src.models.selective_net import SelectiveNet
 from src.models.hybrid_model import HybridEvidentialModel
 from src.models.evidential_layer import EvidentialLayer, compute_uncertainty
-from src.evaluation.metrics import MetricsTracker
+from src.training.eval_utils import load_evaluation_config, create_metrics_tracker
+from src.training.optimizations import get_optimized_device
+from src.evaluation.metrics import (
+    fit_threshold_at_specificity,
+    metrics_with_fixed_threshold,
+    compute_metrics_at_specificity,
+)
+from src.evaluation.calibration import create_calibrator, calibrate_probabilities
 
 import torch.nn as nn
 
@@ -62,6 +69,15 @@ from src.visualization.case_studies import (
 )
 
 
+def _backbone_label(cfg: dict, state_dict: dict) -> str:
+    bb = cfg.get('model', {}).get('backbone', {})
+    bb_type = bb.get('type', 'simple')
+    if bb_type == 'monai' or is_monai_state_dict(state_dict):
+        pre = bb.get('pretrained', 'medicalnet')
+        return f"MONAI+{pre}" if pre else "MONAI"
+    return "simple CNN"
+
+
 def load_model(m_cfg, cfg, device):
     """Załaduj model z checkpointu."""
     # Szukaj checkpointu (obsługa .pt i .pth)
@@ -77,10 +93,25 @@ def load_model(m_cfg, cfg, device):
         print(f"  ⚠️ Checkpoint for {m_cfg['name']} not found in {ckpt_dir}")
         return None, None
 
-    # Załaduj checkpoint i sprawdź klucze state_dict
     checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
     state_dict = checkpoint['model_state_dict']
     state_keys = list(state_dict.keys())
+
+    if 'config' in checkpoint and checkpoint['config']:
+        saved_bb = checkpoint['config'].get('model', {}).get('backbone', {})
+        if saved_bb:
+            cfg = dict(cfg)
+            cfg['model'] = dict(cfg.get('model', {}))
+            cfg['model']['backbone'] = {**cfg['model'].get('backbone', {}), **saved_bb}
+    elif is_monai_state_dict(state_dict):
+        cfg = dict(cfg)
+        cfg['model'] = dict(cfg.get('model', {}))
+        cfg['model']['backbone'] = {
+            **cfg['model'].get('backbone', {}),
+            'type': 'monai',
+            'use_3d': True,
+            'arch_3d': 'resnet10',
+        }
 
     # Auto-detekcja: 2D (Conv2d) vs 3D (Conv3d) backbone
     # Sprawdzamy kształt pierwszej warstwy konwolucyjnej
@@ -161,143 +192,210 @@ def load_model(m_cfg, cfg, device):
     model.load_state_dict(state_dict)
     model.eval()
     arch_label = "2D" if is_2d_checkpoint else "3D"
-    print(f"  ✅ Załadowano: {ckpt_path} (backbone: {arch_label})")
+    bb_label = _backbone_label(cfg, state_dict)
+    print(f"  ✅ Załadowano: {ckpt_path} ({arch_label}, {bb_label})")
 
-    return model, ckpt_path
+    return model, ckpt_path, bb_label
 
 
-def evaluate_model(model, m_cfg, test_loader, device, target_spec=0.95):
-    """
-    Ewaluuje jeden model na zbiorze testowym.
-    """
-    tracker = MetricsTracker(num_classes=2, target_specificity=target_spec)
+def _run_inference(model, m_cfg, loader, device, model_cfg=None, split_name='test'):
+    """Collect predictions, probabilities and logits for a dataloader."""
+    selection_threshold = 0.5
+    if model_cfg and 'selective_net' in model_cfg:
+        selection_threshold = model_cfg['selective_net'].get('selection_threshold', 0.5)
 
-    all_preds = []
-    all_labels = []
-    all_confs = []
-    all_probs = []
-    all_metadata = []
-
-    # Dane specyficzne dla EDL
-    all_epistemic = []
-    all_aleatoric = []
-    all_strength = []
+    preds_list, labels_list, confs_list, probs_list, logits_list = [], [], [], [], []
+    epistemic_list, aleatoric_list, strength_list = [], [], []
+    metadata = []
 
     with torch.no_grad():
-        for images, labels, metadata in tqdm(test_loader, desc=f"  Evaluating {m_cfg['name']}"):
+        for images, labels, batch_meta in tqdm(
+            loader, desc=f"  {m_cfg['name']} [{split_name}]"
+        ):
             images, labels = images.to(device), labels.to(device)
 
             if m_cfg['type'] == 'baseline':
                 logits = model(images)
                 probs = torch.softmax(logits, dim=1)
                 confidences, preds = torch.max(probs, dim=1)
-                tracker.update(preds, labels, confidences=confidences, probabilities=probs)
-
-                all_preds.append(preds.cpu().numpy())
-                all_labels.append(labels.cpu().numpy())
-                all_confs.append(confidences.cpu().numpy())
-                all_probs.append(probs.cpu().numpy())
+                logits_list.append(logits.cpu().numpy())
 
             elif m_cfg['type'] == 'selectivenet':
                 pred_logits, selection_probs = model(images, return_selection=True)
                 probs = torch.softmax(pred_logits, dim=1)
-                preds = torch.argmax(probs, dim=1)
-                tracker.update(preds, labels, confidences=selection_probs, probabilities=probs)
-
-                all_preds.append(preds.cpu().numpy())
-                all_labels.append(labels.cpu().numpy())
-                all_confs.append(selection_probs.cpu().numpy())
-                all_probs.append(probs.cpu().numpy())
+                preds, _, sel_probs, _ = model.predict_with_selection(
+                    images, threshold=selection_threshold
+                )
+                confidences = sel_probs
+                logits_list.append(pred_logits.cpu().numpy())
 
             elif m_cfg['type'] in ['evidential', 'hybrid']:
                 alpha = model(images)
                 strength = alpha.sum(dim=1, keepdim=True)
                 probs = alpha / strength
                 preds = torch.argmax(probs, dim=1)
-
-                # Niepewności
-                epistemic_unc, aleatoric_unc, total_unc = compute_uncertainty(alpha)
+                epistemic_unc, aleatoric_unc, _ = compute_uncertainty(alpha)
                 confidences = 1.0 - epistemic_unc
+                logits_list.append(torch.log(probs.clamp(min=1e-8)).cpu().numpy())
+                epistemic_list.append(epistemic_unc.cpu().numpy())
+                aleatoric_list.append(aleatoric_unc.cpu().numpy())
+                strength_list.append(strength.squeeze(1).cpu().numpy())
+            else:
+                raise ValueError(f"Unknown type: {m_cfg['type']}")
 
-                tracker.update(preds, labels, confidences=confidences, probabilities=probs)
+            preds_list.append(preds.cpu().numpy())
+            labels_list.append(labels.cpu().numpy())
+            confs_list.append(confidences.cpu().numpy())
+            probs_list.append(probs.cpu().numpy())
+            metadata.extend(batch_meta)
 
-                all_preds.append(preds.cpu().numpy())
-                all_labels.append(labels.cpu().numpy())
-                all_confs.append(confidences.cpu().numpy())
-                all_probs.append(probs.cpu().numpy())
-                all_epistemic.append(epistemic_unc.cpu().numpy())
-                all_aleatoric.append(aleatoric_unc.cpu().numpy())
-                all_strength.append(strength.squeeze(1).cpu().numpy())
-
-            all_metadata.extend(metadata)
-
-    # Concatenate
-    result = {
-        'predictions': np.concatenate(all_preds),
-        'labels': np.concatenate(all_labels),
-        'confidences': np.concatenate(all_confs),
-        'probabilities': np.concatenate(all_probs),
-        'metrics': tracker.compute_all_metrics(),
-        'metadata': all_metadata,
+    out = {
+        'predictions': np.concatenate(preds_list),
+        'labels': np.concatenate(labels_list),
+        'confidences': np.concatenate(confs_list),
+        'probabilities': np.concatenate(probs_list),
+        'logits': np.concatenate(logits_list),
+        'metadata': metadata,
     }
+    if epistemic_list:
+        out['epistemic'] = np.concatenate(epistemic_list)
+        out['aleatoric'] = np.concatenate(aleatoric_list)
+        out['strength'] = np.concatenate(strength_list)
+    return out
 
-    # EDL-specific
-    if all_epistemic:
-        result['epistemic'] = np.concatenate(all_epistemic)
-        result['aleatoric'] = np.concatenate(all_aleatoric)
-        result['strength'] = np.concatenate(all_strength)
 
+def evaluate_model(model, m_cfg, val_loader, test_loader, device, eval_cfg, model_cfg=None):
+    """Evaluate on val+test with optional calibration and val→test threshold."""
+    target_spec = eval_cfg.get('target_specificity', 0.80)
+    positive_class = eval_cfg.get('positive_class', 1)
+    protocol = eval_cfg.get('threshold_protocol', 'val_to_test')
+    cal_cfg = eval_cfg.get('calibration', {})
+    cal_enabled = cal_cfg.get('enabled', False)
+    cal_method = cal_cfg.get('method', 'temperature')
+
+    val_raw = _run_inference(model, m_cfg, val_loader, device, model_cfg, 'val')
+    test_raw = _run_inference(model, m_cfg, test_loader, device, model_cfg, 'test')
+
+    val_probs, test_probs = val_raw['probabilities'], test_raw['probabilities']
+    if cal_enabled and cal_method not in (None, 'none'):
+        calibrator = create_calibrator(cal_method)
+        val_probs, test_probs = calibrate_probabilities(
+            calibrator,
+            val_raw.get('logits'),
+            val_raw['probabilities'],
+            val_raw['labels'],
+            test_raw.get('logits'),
+            test_raw['probabilities'],
+            cal_method,
+        )
+
+    tracker = create_metrics_tracker(eval_cfg, num_classes=2)
+    tracker.update(
+        torch.tensor(test_raw['predictions']),
+        torch.tensor(test_raw['labels']),
+        confidences=torch.tensor(test_raw['confidences']),
+        probabilities=torch.tensor(test_probs),
+    )
+    metrics = tracker.compute_all_metrics()
+
+    val_thresh_metrics = {}
+    test_valthresh_metrics = {}
+    if protocol == 'val_to_test':
+        threshold = fit_threshold_at_specificity(
+            val_raw['labels'], val_probs[:, 1], target_spec, positive_class
+        )
+        if np.isfinite(threshold):
+            val_thresh_metrics = metrics_with_fixed_threshold(
+                val_raw['labels'], val_probs[:, 1], threshold, positive_class
+            )
+            test_valthresh_metrics = metrics_with_fixed_threshold(
+                test_raw['labels'], test_probs[:, 1], threshold, positive_class
+            )
+        metrics['val_threshold'] = threshold
+        metrics['metrics_val_threshold_on_val'] = val_thresh_metrics
+        metrics['metrics_val_threshold_on_test'] = test_valthresh_metrics
+
+    if cal_enabled:
+        metrics['metrics_at_target_spec_calibrated'] = compute_metrics_at_specificity(
+            test_raw['labels'], test_probs[:, 1], target_spec, positive_class
+        )
+
+    result = {
+        'predictions': test_raw['predictions'],
+        'labels': test_raw['labels'],
+        'confidences': test_raw['confidences'],
+        'probabilities': test_probs,
+        'probabilities_raw': test_raw['probabilities'],
+        'metrics': metrics,
+        'metadata': test_raw['metadata'],
+    }
+    if 'epistemic' in test_raw:
+        result['epistemic'] = test_raw['epistemic']
+        result['aleatoric'] = test_raw['aleatoric']
+        result['strength'] = test_raw['strength']
     return result
 
 
-def generate_results_table(all_results: dict, target_spec: float = 0.95) -> pd.DataFrame:
+def generate_results_table(
+    all_results: dict,
+    target_spec: float = 0.80,
+    report_specs: list = None,
+) -> pd.DataFrame:
     """Generuje tabelę podsumowującą wyniki wszystkich modeli."""
+    report_specs = report_specs or [0.80, 0.90, 1.0]
     rows = []
     for model_name, data in all_results.items():
         m = data['metrics']
         ms = m.get('metrics_at_target_spec', {})
-        
-        # FP Reduction at 20% abstention
-        fp_red_20 = 0.0
-        if 'fp_reduction' in m and 'abstention_20pct' in m['fp_reduction']:
-            fp_red_20 = m['fp_reduction']['abstention_20pct']['fp_reduction_rate']
-        
-        rows.append({
+        ms_cal = m.get('metrics_at_target_spec_calibrated', {})
+        ms_vt = m.get('metrics_val_threshold_on_test', {})
+
+        row = {
             'Model': model_name,
+            'Backbone': data.get('backbone', ''),
             'Accuracy': f"{m['accuracy']:.4f}",
             'AUC-ROC': f"{m.get('auc', 0):.4f}",
             'AUGRC': f"{m.get('augrc', 0):.4f}",
-            f'Sens@{target_spec:.0%}Spec': f"{ms.get('sensitivity', 0):.4f}",
-            f'Acc@{target_spec:.0%}Spec': f"{ms.get('accuracy', 0):.4f}",
-            f'F1@{target_spec:.0%}Spec': f"{ms.get('f1', 0):.4f}",
+            f'Sens@{target_spec:.0%}Spec (raw)': f"{ms.get('sensitivity', 0):.4f}",
+            f'Sens@{target_spec:.0%}Spec (cal)': f"{ms_cal.get('sensitivity', ms.get('sensitivity', 0)):.4f}",
+            f'Sens@{target_spec:.0%}Spec (val→test)': f"{ms_vt.get('sensitivity', 0):.4f}",
             'Abstention%': f"{m.get('abstention_rate', 0):.2%}",
-        })
+        }
+        for spec in report_specs:
+            key = f"sens_at_{int(spec * 100)}spec"
+            if key in m:
+                row[f'Sens@{spec:.0%}Spec'] = f"{m[key]:.4f}"
+        rows.append(row)
     return pd.DataFrame(rows)
 
 
 def evaluate():
     """Główna funkcja ewaluacyjna."""
+    parser = argparse.ArgumentParser(description='Evaluate all models on test set')
+    parser.add_argument(
+        '--include-phase2',
+        action='store_true',
+        help='Include Phase 2 MONAI models (all 4 *_monai checkpoints)',
+    )
+    args = parser.parse_args()
+
     print("=" * 70)
     print("  FINALNA EWALUACJA MODELI – ZBIÓR TESTOWY ADNI  ")
     print("=" * 70)
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_optimized_device('cuda')
     print(f"  Device: {device}")
 
     # ── Konfiguracja danych i ewaluacji ──────────────────────────────────
     with open('configs/data_config.yaml', 'r') as f:
         data_cfg = yaml.safe_load(f)
-    
-    # Załaduj konfigurację ewaluacji (nowy plik)
-    eval_cfg_path = Path('configs/evaluation_config.yaml')
-    if eval_cfg_path.exists():
-        with open(eval_cfg_path, 'r') as f:
-            eval_cfg = yaml.safe_load(f)
-    else:
-        eval_cfg = {'target_specificity': 0.95}
-    
-    target_spec = eval_cfg.get('target_specificity', 0.95)
-    print(f"  Target Specificity (sztywny próg): {target_spec:.2%}")
+
+    eval_cfg = load_evaluation_config()
+    target_spec = eval_cfg.get('target_specificity', 0.80)
+    report_specs = eval_cfg.get('report_specificities', [0.80, 0.90, 1.0])
+    print(f"  Target Specificity: {target_spec:.2%}")
+    print(f"  Threshold protocol: {eval_cfg.get('threshold_protocol', 'val_to_test')}")
+    print(f"  Calibration: {eval_cfg.get('calibration', {})}")
 
     dm = MCIDataModule(
         metadata_csv=data_cfg['paths']['metadata_csv'],
@@ -305,15 +403,22 @@ def evaluate():
         batch_size=data_cfg['dataloader']['batch_size'],
         num_workers=data_cfg['dataloader']['num_workers']
     )
+    val_loader = dm.val_dataloader()
     test_loader = dm.test_dataloader()
 
-    # ── Modele do ewaluacji ──────────────────────────────────────────────
     model_configs = [
-        {'name': 'Baseline (SR)',          'config': 'configs/baseline_config.yaml',     'type': 'baseline'},
-        {'name': 'SelectiveNet',           'config': 'configs/selectivenet_config.yaml',  'type': 'selectivenet'},
-        {'name': 'Evidential (EDL)',       'config': 'configs/evidential_config.yaml',    'type': 'evidential'},
-        {'name': 'Hybrid (3D-ResNet-EDL)', 'config': 'configs/hybrid_config.yaml',       'type': 'hybrid'},
+        {'name': 'Baseline (SR)', 'config': 'configs/baseline_config_phase1.yaml', 'type': 'baseline'},
+        {'name': 'SelectiveNet', 'config': 'configs/selectivenet_config_phase1.yaml', 'type': 'selectivenet'},
+        {'name': 'Evidential (EDL)', 'config': 'configs/evidential_config_phase1.yaml', 'type': 'evidential'},
+        {'name': 'Hybrid (3D-ResNet-EDL)', 'config': 'configs/hybrid_config_phase1.yaml', 'type': 'hybrid'},
     ]
+    if args.include_phase2:
+        model_configs.extend([
+            {'name': 'Baseline (MONAI)', 'config': 'configs/baseline_config.yaml', 'type': 'baseline'},
+            {'name': 'SelectiveNet (MONAI)', 'config': 'configs/selectivenet_config.yaml', 'type': 'selectivenet'},
+            {'name': 'Evidential (MONAI)', 'config': 'configs/evidential_config.yaml', 'type': 'evidential'},
+            {'name': 'Hybrid (MONAI)', 'config': 'configs/hybrid_config.yaml', 'type': 'hybrid'},
+        ])
 
     results_dir = Path('results')
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -335,23 +440,28 @@ def evaluate():
             cfg = yaml.safe_load(f)
 
         print(f"\n📊 {m_cfg['name']}:")
-        model, ckpt_path = load_model(m_cfg, cfg, device)
-        if model is None:
+        loaded = load_model(m_cfg, cfg, device)
+        if loaded[0] is None:
             continue
+        model, ckpt_path, bb_label = loaded
 
-        result = evaluate_model(model, m_cfg, test_loader, device, target_spec=target_spec)
+        result = evaluate_model(
+            model, m_cfg, val_loader, test_loader, device, eval_cfg, model_cfg=cfg
+        )
+        result['backbone'] = bb_label
         all_results[m_cfg['name']] = result
 
         m = result['metrics']
         ms = m.get('metrics_at_target_spec', {})
+        ms_vt = m.get('metrics_val_threshold_on_test', {})
         print(f"     Accuracy:  {m['accuracy']:.4f}")
         print(f"     F1:        {m['f1']:.4f}")
         print(f"     AUC:       {m.get('auc', 0):.4f}")
         print(f"     AUGRC:     {m.get('augrc', 0):.4f}")
-        print(f"     --- @ {target_spec*100:.0f}% Specificity ---")
+        print(f"     --- @ {target_spec*100:.0f}% Spec (raw test ROC) ---")
         print(f"     Sensitivity: {ms.get('sensitivity', 0):.4f}")
-        print(f"     Accuracy:    {ms.get('accuracy', 0):.4f}")
-        print(f"     F1:          {ms.get('f1', 0):.4f}")
+        print(f"     --- val→test threshold ---")
+        print(f"     Sensitivity: {ms_vt.get('sensitivity', 0):.4f} (Spec={ms_vt.get('actual_specificity', 0):.4f})")
 
         # Zwolnij pamięć GPU
         del model
@@ -366,7 +476,9 @@ def evaluate():
     print("  ETAP 2: Tabela wyników")
     print("─" * 70)
 
-    results_df = generate_results_table(all_results, target_spec=target_spec)
+    results_df = generate_results_table(
+        all_results, target_spec=target_spec, report_specs=report_specs
+    )
     csv_path = results_dir / 'final_comparison.csv'
     results_df.to_csv(csv_path, index=False)
     print(f"\n{results_df.to_string(index=False)}")

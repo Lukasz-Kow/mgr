@@ -30,7 +30,7 @@ def main():
     print(f"Output CSV: {output_csv}")
     
     if not os.path.exists(dataset_root):
-        print(f"❌ ERROR: Dataset root '{dataset_root}' not found!")
+        print(f"[ERROR] Dataset root '{dataset_root}' not found!")
         return
     
     # Create mapper
@@ -40,7 +40,7 @@ def main():
     df = mapper.scan_dataset()
     
     if len(df) == 0:
-        print("❌ ERROR: No samples found!")
+        print("[ERROR] No samples found!")
         return
     
     # Create splits
@@ -57,7 +57,7 @@ def main():
     # Save
     mapper.save_metadata(df, output_csv)
     
-    print("\n✅ Metadata saved to:", output_csv)
+    print("\n[SUCCESS] Metadata saved to:", output_csv)
     print("="*60)
 
 if __name__ == '__main__':

@@ -9,11 +9,11 @@ preprocessing:
 augmentation:
   enabled: true
   horizontal_flip: true
-  rotation_range: 10.0  # degrees
-  random_brightness: 0.1  # +/- 10%
-  random_contrast: 0.1   # +/- 10%
-  elastic_deformation: true   # TorchIO elastic deformation (anatomical variability)
-  bias_field: true             # TorchIO bias field (MRI scanner artifacts)
+  rotation_range: 5.0   # degrees (reduced for small ADNI subset)
+  random_brightness: 0.05  # +/- 5%
+  random_contrast: 0.05    # +/- 5%
+  elastic_deformation: false   # TorchIO elastic deformation (disabled for speed)
+  bias_field: false             # TorchIO bias field (disabled for speed)
 
 # Dataset splits
 splits:
@@ -25,9 +25,10 @@ splits:
 
 # DataLoader settings
 dataloader:
-  batch_size: 4  # Smaller batch size for 3D
+  batch_size: 1  # GTX 1050 / 3D volumes
   num_workers: -1  # Automatic detection
   pin_memory: true
+  balance_classes: true
 
 # Paths
 paths:

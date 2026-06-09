@@ -8,17 +8,32 @@ ipex = None
 try:
     import intel_extension_for_pytorch as ipex
 except (ImportError, AttributeError, RuntimeError, SystemExit) as e:
-    # SystemExit is important here because some IPEX versions call os.exit on version mismatch
-    print(f"\n⚠️  Warning: Intel Extension for PyTorch (IPEX) could not be initialized.")
-    print(f"   Details: {e}")
-    print("   Falling back to standard PyTorch (CPU) modes.\n")
+    # Ignorujemy błąd - na układach NVIDIA (CUDA) IPEX nie jest nam potrzebny
     ipex = None
+
+def setup_cuda_optimizations():
+    """
+    Apply global optimizations for Nvidia GPUs (TF32 and cuDNN benchmark).
+    """
+    if torch.cuda.is_available():
+        # Enable TF32 for matrix multiplications (Ampere+ GPUs)
+        torch.backends.cuda.matmul.allow_tf32 = True
+        # Enable TF32 for cuDNN
+        torch.backends.cudnn.allow_tf32 = True
+        # Disable cuDNN benchmark for 3D CNNs on constrained hardware (causes very long hangs on first batch)
+        torch.backends.cudnn.benchmark = False
+        print("[CUDA] CUDA optimizations enabled: TF32 (cuDNN benchmark disabled to prevent hanging)")
 
 def get_optimized_device(config_device=None):
     """
     Detect the best available device, prioritizing CUDA, then Intel XPU, then CPU.
+    Respects config_device='cpu' to force CPU training.
     """
+    if config_device == 'cpu':
+        return torch.device("cpu")
+
     if torch.cuda.is_available():
+        setup_cuda_optimizations()
         return torch.device("cuda")
     
     if ipex is not None and hasattr(torch, 'xpu') and torch.xpu.is_available():
@@ -26,27 +41,44 @@ def get_optimized_device(config_device=None):
     
     return torch.device("cpu")
 
-def optimize_model_and_optimizer(model, optimizer=None, dtype=torch.float32):
+def optimize_model_and_optimizer(model, optimizer=None, dtype=torch.float32, device=None):
     """
-    Apply Intel IPEX optimizations if available.
+    Apply hardware-specific optimizations:
+    - Nvidia/CUDA: PyTorch 2.0+ torch.compile
+    - Intel: IPEX optimizations
     """
-    if ipex is not None:
+    # PyTorch 2.0 compile for CUDA
+    if device is not None and device.type == 'cuda' and hasattr(torch, 'compile'):
+        # Triton (używany przez torch.compile) wymaga Compute Capability >= 7.0
+        major, minor = torch.cuda.get_device_capability(device)
+        if major >= 7:
+            try:
+                model = torch.compile(model)
+                print("[compile] PyTorch 2.0 model compilation enabled (torch.compile)")
+            except Exception as e:
+                print(f"[compile WARNING] torch.compile failed or not supported: {e}")
+        else:
+            print(f"[compile INFO] Skipping torch.compile because CUDA Capability is {major}.{minor} (requires >= 7.0)")
+
+    # Intel IPEX optimizations
+    if ipex is not None and (device is None or device.type in ['cpu', 'xpu']):
         try:
             if optimizer:
                 model, optimizer = ipex.optimize(model, optimizer=optimizer, dtype=dtype)
             else:
                 model = ipex.optimize(model, dtype=dtype)
-            print(f"✅ Intel IPEX optimizations applied (dtype={dtype})")
+            print(f"[IPEX] Intel IPEX optimizations applied (dtype={dtype})")
         except AssertionError as e:
             if "BF16 weight prepack" in str(e):
-                print(f"⚠️  Hardware doesn't support BF16 prepacking. Retrying with weights_prepack=False...")
+                print(f"[IPEX WARNING] Hardware doesn't support BF16 prepacking. Retrying with weights_prepack=False...")
                 if optimizer:
                     model, optimizer = ipex.optimize(model, optimizer=optimizer, dtype=dtype, weights_prepack=False)
                 else:
                     model = ipex.optimize(model, dtype=dtype, weights_prepack=False)
-                print(f"✅ Intel IPEX optimizations applied (without prepacking)")
+                print(f"[IPEX] Intel IPEX optimizations applied (without prepacking)")
             else:
-                print(f"❌ IPEX optimization failed: {e}. Continuing without IPEX optimization.")
+                print(f"[IPEX ERROR] IPEX optimization failed: {e}. Continuing without IPEX optimization.")
+    
     return model, optimizer
 
 def get_amp_config(device):
@@ -70,7 +102,7 @@ def get_amp_config(device):
         if bf16_supported:
             dtype = torch.bfloat16
         else:
-            print("ℹ️  BFloat16 not supported by CPU, using Float32 (Standard)")
+            print("[IPEX INFO] BFloat16 not supported by CPU, using Float32 (Standard)")
             enabled = False
             dtype = torch.float32
     else:

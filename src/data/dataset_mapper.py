@@ -101,10 +101,10 @@ class DatasetMapper:
              metadata_csv = self.dataset_root.parent / 'Data_baseline_2_23_2026.csv'
 
         if not metadata_csv.exists():
-            print("❌ BŁĄD: BRAK pliku metadanych Data_baseline_2_23_2026.csv!")
-            return pd.DataFrame()
+             print("[ERROR] Missing metadata file Data_baseline_2_23_2026.csv!")
+             return pd.DataFrame()
 
-        print(f"Ładowanie metadanych z {metadata_csv}...")
+        print(f"Loading metadata from {metadata_csv}...")
         csv_df = pd.read_csv(metadata_csv)
         
         # Przygotuj słownik do szybkiego wyszukiwania informacji o obrazie
@@ -379,12 +379,12 @@ class DatasetMapper:
             subjects_s2 = set(df[df['split'] == s2]['subject'])
             overlap = subjects_s1 & subjects_s2
             if overlap:
-                print(f"⚠️  WYCIEK DANYCH: {len(overlap)} pacjentów w {s1} i {s2}: {list(overlap)[:5]}...")
+                print(f"[WARNING] DATA LEAKAGE: {len(overlap)} patients in {s1} and {s2}: {list(overlap)[:5]}...")
             else:
-                print(f"✅ Brak wycieku między {s1} a {s2}")
+                print(f"[OK] No leakage between {s1} and {s2}")
         
         total_subjects = df['subject'].nunique()
-        print(f"\\nŁącznie unikalnych pacjentów: {total_subjects}")
+        print(f"\\nTotal unique subjects: {total_subjects}")
     
     def save_metadata(self, df: pd.DataFrame, output_path: str):
         """
@@ -398,7 +398,7 @@ class DatasetMapper:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         
         df.to_csv(output_path, index=False)
-        print(f"\\nMetadane zapisane do: {output_path}")
+        print(f"\\nMetadata saved to: {output_path}")
 
 
 def main():

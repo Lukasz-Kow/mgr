@@ -1,12 +1,22 @@
 # Evaluation configuration for MCI classification
 # This file centralizes metrics requirements for the thesis.
 
-# Target Specificity (Swoistość) for clinical operating point
-# Common values: 0.90 or 0.95
-target_specificity: 0.95
+# Target Specificity (Swoistość) for clinical operating point + checkpoint
+target_specificity: 0.80
+
+# Additional specificity levels to report (1.0 = Sens at 0 FP)
+report_specificities: [0.80, 0.90, 1.0]
+
+# Fit classification threshold on val, apply to test (no test-label leakage)
+threshold_protocol: val_to_test
 
 # Positive class label (MCI)
 positive_class: 1
+
+# Probability calibration (fit on val, apply on test)
+calibration:
+  enabled: true
+  method: temperature  # temperature | platt | none
 
 # Metrics to report at the fixed specificity operating point
 report_metrics_at_spec:
