@@ -5,7 +5,7 @@
 target_specificity: 0.80
 
 # Additional specificity levels to report (1.0 = Sens at 0 FP)
-report_specificities: [0.80, 0.90, 1.0]
+report_specificities: [0.70, 0.80, 0.90, 0.95, 1.0]
 
 # Fit classification threshold on val, apply to test (no test-label leakage)
 threshold_protocol: val_to_test
@@ -18,6 +18,28 @@ calibration:
   enabled: true
   method: temperature  # temperature | platt | none
 
+# Abstention: fit rejection threshold on val, apply on test
+abstention:
+  enabled: true
+  protocol: val_to_test
+  target_coverage: 0.80
+  uncertainty_type: epistemic  # epistemic | aleatoric | total
+
+# Alternative val→test threshold strategies (classification, not abstention)
+threshold_strategies:
+  - fixed_specificity
+  - youden
+  - max_f1
+
+# Bootstrap confidence intervals on test set
+bootstrap:
+  enabled: true
+  n_iterations: 1000
+  metrics:
+    - sensitivity
+    - specificity
+    - auc
+
 # Metrics to report at the fixed specificity operating point
 report_metrics_at_spec:
   - accuracy
@@ -26,5 +48,12 @@ report_metrics_at_spec:
   - sensitivity
   - confusion_matrix
 
-# Abstention levels to evaluate for Risk-Coverage
+# Abstention levels for FP-reduction sweep in MetricsTracker
 abstention_levels: [0.1, 0.2, 0.3, 0.5]
+
+# Hybrid dual-gate inference (Gate 1: spec threshold, Gate 2: uncertainty + strength)
+hybrid:
+  dual_gate:
+    enabled: true
+    strength_min: 2.0
+    uncertainty_type: epistemic

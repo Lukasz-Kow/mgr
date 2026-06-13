@@ -78,33 +78,41 @@ Opcja czystego retreningu (usuwa checkpointy):
 .\run_windows.ps1 -Clean -PrepareData -TrainAll
 ```
 
-### Faza 2 — MONAI ResNet3D-10 + MedicalNet (wszystkie 4 modele)
+### Backbone — MONAI ResNet3D-10 + MedicalNet
 
-Faza 2 podmienia backbone na MONAI ResNet3D-10 z wagami MedicalNet (transfer learning z MRI). Checkpointy Fazy 1 pozostają w `checkpoints/baseline`, `selective_net`, `evidential`, `hybrid`; Faza 2 zapisuje do `checkpoints/*_monai`.
+Wszystkie 4 modele używają MONAI ResNet3D-10 z wagami MedicalNet (transfer learning z MRI). Checkpointy: `checkpoints/baseline`, `selective_net`, `evidential`, `hybrid`.
 
 ```powershell
 pip install monai huggingface_hub
 python scripts/verify_monai_backbone.py
-
-# Retrening wszystkich 4 modeli MONAI (~10-14 h na GTX 1050)
-.\run_windows.ps1 -Phase2 -TrainAll -Clean
-
-# Ewaluacja porównawcza Faza 1 vs Faza 2 (8 wierszy w tabeli)
-.\run_windows.ps1 -Phase2 -Evaluate
-# lub: python scripts/evaluate_all.py --include-phase2
 ```
 
 Wagi MedicalNet są pobierane z HuggingFace (`TencentMedicalNet/MedicalNet-Resnet10`) i cache'owane w `~/.cache/huggingface`. Przy braku internetu można ręcznie umieścić `resnet_10_23dataset.pth` w cache HF.
 
 ## Dataset
 
-Projekt używa podzbioru ADNI (MCI vs CN):
-- Dane obrazowe: `Data baseline/ADNI/`
-- Etykiety: `Data_baseline_2_23_2026.csv`
-- Metadane (generowane): `data_metadata_adni.csv`
+Projekt używa danych ADNI (MCI vs CN) w strukturze:
+
+```
+Data baseline/
+├── metadata/
+│   ├── baseline_2026-02-23.csv        # 147 pacjentów, wizyta bl
+│   ├── mci_cn_scaled2_2026-06-09.csv    # 1328 pacjentów, ADNI2
+│   └── inventory_report.json            # raport inwentaryzacji
+└── ADNI/
+    ├── baseline/                        # stary zbiór (147 pacjentów)
+    └── ADNI2/                           # nowe pobranie (959 pacjentów)
+```
+
+- Metadane treningowe (generowane): `data_metadata_adni.csv` (978 pacjentów, 1 skan/pacjent)
+- Kompatybilność wsteczna: `Data_baseline_2_23_2026.csv` (kopia baseline CSV)
 
 ```powershell
-python scripts/prepare_adni_dataset.py
+# Raport stanu danych
+python scripts/organize_adni_data.py
+
+# Generowanie data_metadata_adni.csv
+python scripts/prepare_dataset.py --dataset_root "Data baseline" --output data_metadata_adni.csv
 ```
 
 ## Trening Modeli
@@ -133,6 +141,16 @@ python scripts/evaluate_all.py
 ```
 
 Wyniki trafiają do `results/` (tabela, krzywe ROC, Risk-Coverage).
+
+### Protokół abstencji (val→test)
+
+W `configs/evaluation_config.yaml`:
+- `abstention.target_coverage: 0.80` — odrzucane jest ~20% najbardziej niepewnych próbek (próg dopasowany na val)
+- Baseline: abstencja gdy `max(softmax) < τ`
+- EDL/Hybrid: abstencja gdy niepewność epistemiczna `> τ`
+- SelectiveNet: próg głowicy selekcyjnej dopasowany na val
+
+Dodatkowe raporty: `results/fp_coverage.csv`, `results/comparison_with_abstention.csv`, `results/case_agreement.csv`
 
 ## Metryki (SMART / Measurable)
 

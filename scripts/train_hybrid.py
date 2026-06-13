@@ -34,10 +34,12 @@ from src.training.fine_tune import (
     build_optimizer_param_groups,
     should_count_early_stopping,
 )
+from src.training.imbalance_strategy import add_imbalance_cli_args, apply_train_overrides
 
 def train():
     parser = argparse.ArgumentParser(description='Train Hybrid 3D-ResNet-EDL Model')
     parser.add_argument('--config', type=str, default='configs/hybrid_config.yaml', help='Path to config file')
+    add_imbalance_cli_args(parser)
     args = parser.parse_args()
 
     # Load config
@@ -47,6 +49,9 @@ def train():
     # Load data config for preprocessing settings
     with open('configs/data_config.yaml', 'r') as f:
         data_cfg = yaml.safe_load(f)
+    
+    imbalance = apply_train_overrides(args, data_cfg, config)
+    print(f"Imbalance strategy: {imbalance['imbalance_strategy']}")
     
     eval_cfg = load_evaluation_config()
     target_spec = eval_cfg.get('target_specificity', 0.95)
@@ -67,7 +72,7 @@ def train():
         num_workers=data_cfg['dataloader']['num_workers'],
         augmentation_config=data_cfg,
         cache_dir='cache/hybrid',
-        balance_classes=data_cfg['dataloader'].get('balance_classes', False)
+        balance_classes=imbalance['balance_classes']
     )
 
     train_loader = dm.train_dataloader()
@@ -87,11 +92,17 @@ def train():
         print(f"Fine-tune: encoder frozen for epochs 1–{freeze_epochs}")
 
     # Loss
+    class_weights = None
+    if imbalance['use_class_weights']:
+        class_weights = dm.get_class_weights().to(device)
+        print(f"Using class weights: {class_weights.tolist()}")
+
     criterion = EvidentialLoss(
         num_classes=config['model']['classifier']['num_classes'],
         kl_weight=config['evidential']['kl_weight'],
         kl_anneal_start=config['evidential']['kl_anneal_start'],
-        kl_anneal_end=config['evidential']['kl_anneal_end']
+        kl_anneal_end=config['evidential']['kl_anneal_end'],
+        class_weights=class_weights,
     )
 
     def _make_optimizer():

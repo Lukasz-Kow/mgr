@@ -1,4 +1,4 @@
-# Baseline Model Configuration (Phase 2: MONAI ResNet3D-10 + MedicalNet)
+# Baseline Model Configuration (MONAI ResNet3D-10 + MedicalNet)
 
 model:
   backbone:
@@ -25,6 +25,7 @@ training:
   learning_rate: 0.0001
   weight_decay: 0.001
   warmup_epochs: 8
+  validate_every_n: 2
 
   optimizer: 'adam'
 
@@ -36,7 +37,7 @@ training:
 
   early_stopping:
     enabled: true
-    patience: 30
+    patience: 15
     metric: 'val_sensitivity_at_target_spec'
     mode: 'max'
 
@@ -50,13 +51,13 @@ data:
   metadata_csv: 'data_metadata_adni.csv'
 
 checkpoint:
-  dir: 'checkpoints/baseline_monai'
+  dir: 'checkpoints/baseline'
   save_best_only: true
   monitor: 'val_sensitivity_at_target_spec'
   mode: 'max'
 
 logging:
-  tensorboard_dir: 'runs/baseline_monai'
+  tensorboard_dir: 'runs/baseline'
   log_interval: 10
   save_predictions: true
 

@@ -1,0 +1,35 @@
+experiment_name: imbalance_ablation
+seed: 42
+
+checkpoint_root: experiments/imbalance_ablation/checkpoints
+results_root: experiments/imbalance_ablation/results
+manifests_root: experiments/imbalance_ablation/manifests
+
+arms:
+  arm_c:
+    strategy: balanced_sampler
+    config_file: arms/arm_c_balanced_sampler.yaml
+  arm_a:
+    strategy: natural
+    config_file: arms/arm_a_natural.yaml
+  arm_b:
+    strategy: cost_sensitive
+    config_file: arms/arm_b_cost_sensitive.yaml
+
+models:
+  - name: baseline
+    script: scripts/train_baseline.py
+    config: configs/baseline_config.yaml
+    checkpoint_name: best_model.pth
+  - name: selective_net
+    script: scripts/train_selectivenet.py
+    config: configs/selectivenet_config.yaml
+    checkpoint_name: best_model.pt
+  - name: evidential
+    script: scripts/train_evidential.py
+    config: configs/evidential_config.yaml
+    checkpoint_name: best_model.pt
+  - name: hybrid
+    script: scripts/train_hybrid.py
+    config: configs/hybrid_config.yaml
+    checkpoint_name: best_model.pt

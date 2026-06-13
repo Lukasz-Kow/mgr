@@ -33,6 +33,7 @@ ADNI_*/
 *.nii
 *.nii.gz
 checkpoints/
+archives/
 *.pth
 *.ckpt
 *.h5

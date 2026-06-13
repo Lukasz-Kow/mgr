@@ -12,11 +12,19 @@ def load_evaluation_config(path: str = "configs/evaluation_config.yaml") -> Dict
     cfg_path = Path(path)
     defaults = {
         "target_specificity": 0.80,
-        "report_specificities": [0.80, 0.90, 1.0],
+        "report_specificities": [0.70, 0.80, 0.90, 0.95, 1.0],
         "threshold_protocol": "val_to_test",
         "positive_class": 1,
         "abstention_levels": [0.1, 0.2, 0.3, 0.5],
         "calibration": {"enabled": False, "method": "none"},
+        "abstention": {
+            "enabled": False,
+            "protocol": "val_to_test",
+            "target_coverage": 0.80,
+            "uncertainty_type": "epistemic",
+        },
+        "threshold_strategies": ["fixed_specificity"],
+        "bootstrap": {"enabled": False, "n_iterations": 1000, "metrics": ["sensitivity", "specificity", "auc"]},
     }
     if cfg_path.exists():
         with open(cfg_path, "r") as f:
@@ -24,6 +32,10 @@ def load_evaluation_config(path: str = "configs/evaluation_config.yaml") -> Dict
         defaults.update(loaded)
         if "calibration" in loaded:
             defaults["calibration"] = {**defaults.get("calibration", {}), **loaded["calibration"]}
+        if "abstention" in loaded:
+            defaults["abstention"] = {**defaults.get("abstention", {}), **loaded["abstention"]}
+        if "bootstrap" in loaded:
+            defaults["bootstrap"] = {**defaults.get("bootstrap", {}), **loaded["bootstrap"]}
     return defaults
 
 
@@ -45,6 +57,18 @@ def create_metrics_tracker(
 def get_monitor_value(metrics: Dict[str, Any], monitor_key: str) -> float:
     """Resolve checkpoint monitor value from flat or nested metric dict."""
     key = monitor_key.replace("val_", "")
+
+    if key in ("composite", "val_composite"):
+        auc = float(metrics.get("auc", 0.0))
+        sens = float(metrics.get("metrics_at_target_spec", {}).get("sensitivity", 0.0))
+        return 0.5 * auc + 0.5 * sens
+
+    if key in ("augrc", "val_augrc"):
+        return float(metrics.get("augrc", 0.0))
+
+    if key in ("auc", "val_auc"):
+        return float(metrics.get("auc", 0.0))
+
     if key in metrics:
         return float(metrics[key])
 

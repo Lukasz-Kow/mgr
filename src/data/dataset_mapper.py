@@ -12,7 +12,7 @@ import os
 import re
 import pandas as pd
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 import random
 
 
@@ -31,6 +31,24 @@ class DatasetMapper:
         0: 'CN',
         1: 'MCI'
     }
+
+    ADNI_GROUP_MAPPING = {
+        'CN': 0,
+        'MCI': 1,
+        'LMCI': 1,
+        'EMCI': 1,
+    }
+
+    VISIT_PRIORITY = {
+        'bl': 1,
+        'sc': 2,
+        'init': 3,
+        'scmri': 4,
+        'v02': 5,
+    }
+
+    METADATA_BASELINE_CSV = 'baseline_2026-02-23.csv'
+    METADATA_MCI_CN_CSV = 'mci_cn_scaled2_2026-06-09.csv'
     
     def __init__(self, dataset_root: str):
         """
@@ -83,109 +101,177 @@ class DatasetMapper:
         self._print_stats(df)
         return df
 
+    def _resolve_metadata_csv_paths(self) -> Tuple[Optional[Path], Optional[Path]]:
+        """Locate baseline and MCI_CN metadata CSV files."""
+        candidates = [
+            self.dataset_root / 'metadata',
+            self.dataset_root.parent / 'metadata',
+            Path.cwd() / 'Data baseline' / 'metadata',
+            Path.cwd(),
+        ]
+        baseline_csv = None
+        mci_cn_csv = None
+        for base in candidates:
+            b = base / self.METADATA_BASELINE_CSV
+            m = base / self.METADATA_MCI_CN_CSV
+            if baseline_csv is None and b.exists():
+                baseline_csv = b
+            if mci_cn_csv is None and m.exists():
+                mci_cn_csv = m
+        if baseline_csv is None:
+            for name in ('Data_baseline_2_23_2026.csv', self.METADATA_BASELINE_CSV):
+                for base in (Path.cwd(), self.dataset_root.parent, self.dataset_root):
+                    p = base / name
+                    if p.exists():
+                        baseline_csv = p
+                        break
+                if baseline_csv is not None:
+                    break
+        return baseline_csv, mci_cn_csv
+
+    def _load_adni_image_info(self) -> Dict[str, dict]:
+        """Merge baseline and MCI_CN CSV metadata keyed by Image Data ID."""
+        baseline_csv, mci_cn_csv = self._resolve_metadata_csv_paths()
+        image_info: Dict[str, dict] = {}
+
+        def _ingest(df: pd.DataFrame, source: str, overwrite: bool = False) -> None:
+            for _, row in df.iterrows():
+                image_id = str(row['Image Data ID'])
+                if image_id in image_info and not overwrite:
+                    continue
+                image_info[image_id] = {
+                    'group': row['Group'],
+                    'description': row['Description'],
+                    'subject': row['Subject'],
+                    'visit': str(row.get('Visit', '')),
+                    'source': source,
+                }
+
+        if mci_cn_csv is not None:
+            print(f"Loading metadata from {mci_cn_csv}...")
+            _ingest(pd.read_csv(mci_cn_csv), 'mci_cn_scaled2')
+        if baseline_csv is not None:
+            print(f"Loading metadata from {baseline_csv}...")
+            _ingest(pd.read_csv(baseline_csv), 'baseline', overwrite=True)
+
+        if not image_info:
+            print("[ERROR] No ADNI metadata CSV files found!")
+        return image_info
+
+    def _adni_scan_roots(self, adni_root: Path) -> List[Tuple[str, Path]]:
+        """Return (cohort_name, path) pairs to scan for NIfTI files."""
+        roots: List[Tuple[str, Path]] = []
+        baseline_dir = adni_root / 'baseline'
+        adni2_dir = adni_root / 'ADNI2'
+        if baseline_dir.is_dir():
+            roots.append(('baseline', baseline_dir))
+        if adni2_dir.is_dir():
+            roots.append(('ADNI2', adni2_dir))
+        if not roots:
+            roots.append(('baseline', adni_root))
+        return roots
+
+    @staticmethod
+    def _extract_image_id(img_path: Path) -> Optional[str]:
+        parent_id = img_path.parent.name
+        if parent_id.startswith('I'):
+            return parent_id
+        match = re.search(r'_(I\d+)$', img_path.stem)
+        if match:
+            return match.group(1)
+        return None
+
+    @staticmethod
+    def _visit_priority(visit: str) -> int:
+        return DatasetMapper.VISIT_PRIORITY.get(str(visit).lower(), 99)
+
+    @staticmethod
+    def _preprocess_priority(description: str) -> int:
+        desc = description.upper()
+        if 'SCALED_2' in desc:
+            return 1
+        if 'SCALED' in desc:
+            return 2
+        if 'N3' in desc:
+            return 3
+        return 4
+
+    @staticmethod
+    def _cohort_priority(cohort: str) -> int:
+        return 1 if cohort == 'baseline' else 2
+
+    def _relative_data_path(self, img_path: Path) -> str:
+        for base in (Path.cwd(), self.dataset_root.parent, self.dataset_root):
+            try:
+                return str(img_path.resolve().relative_to(base.resolve()))
+            except ValueError:
+                continue
+        return str(img_path)
+
     def _scan_adni_dataset(self, adni_root: Path) -> pd.DataFrame:
         """
-        Skanuje strukturę ADNI i mapuje na klasy z CSV (jeśli dostępne).
-        Zapewnia filtrowanie: 1 obraz na pacjenta, według priorytetu:
-        Scaled_2 > Scaled > N3.
+        Skanuje strukturę ADNI (baseline + ADNI2) i mapuje na klasy z CSV.
+        Wybiera 1 obraz na pacjenta według priorytetu:
+        visit (bl > sc > init > scmri > v02), preprocessing (Scaled_2 > Scaled > N3),
+        cohort (baseline > ADNI2).
         """
         print(f"Skanowanie datasetu ADNI w: {adni_root}")
-        
-        # Znajdź wszystkie pliki .nii
-        nii_files = list(adni_root.rglob('*.nii'))
+        image_info = self._load_adni_image_info()
+        if not image_info:
+            return pd.DataFrame()
+
+        nii_files: List[Tuple[str, Path]] = []
+        for cohort, scan_root in self._adni_scan_roots(adni_root):
+            for img_path in scan_root.rglob('*.nii'):
+                if 'Zone.Identifier' not in img_path.name:
+                    nii_files.append((cohort, img_path))
         print(f"Znaleziono {len(nii_files)} plików .nii")
-        
-        # Jeśli mamy plik metadata CSV
-        metadata_csv = Path('Data_baseline_2_23_2026.csv')
-        if not metadata_csv.exists():
-             metadata_csv = self.dataset_root.parent / 'Data_baseline_2_23_2026.csv'
 
-        if not metadata_csv.exists():
-             print("[ERROR] Missing metadata file Data_baseline_2_23_2026.csv!")
-             return pd.DataFrame()
+        subject_candidates: Dict[str, list] = {}
 
-        print(f"Loading metadata from {metadata_csv}...")
-        csv_df = pd.read_csv(metadata_csv)
-        
-        # Przygotuj słownik do szybkiego wyszukiwania informacji o obrazie
-        # Image Data ID -> (Group, Description, Subject)
-        image_info = {}
-        for _, row in csv_df.iterrows():
-            image_info[str(row['Image Data ID'])] = {
-                'group': row['Group'],
-                'description': row['Description'],
-                'subject': row['Subject']
-            }
-
-        # ADNI mapping grupy na label
-        ADNI_MAPPING = {
-            'CN': 0,
-            'MCI': 1,
-            'LMCI': 1,
-            'EMCI': 1
-        }
-
-        # Zbieraj wszystkich kandydatów pogrupowanych po pacjencie (Subject)
-        subject_candidates = {}
-
-        for img_path in nii_files:
-            if 'Zone.Identifier' in img_path.name:
+        for cohort, img_path in nii_files:
+            image_id = self._extract_image_id(img_path)
+            if image_id is None:
                 continue
-                
-            # Wyciągnij ID obrazu (zwykle ID to nazwa folderu nadrzędnego)
-            parent_id = img_path.parent.name
-            
-            info = image_info.get(parent_id)
-            if info is None:
-                # Spróbuj wyciągnąć z nazwy pliku
-                name_parts = img_path.stem.split('_')
-                if name_parts[-1].startswith('I'):
-                    info = image_info.get(name_parts[-1])
-
+            info = image_info.get(image_id)
             if info is None:
                 continue
 
             group = info['group']
-            label = ADNI_MAPPING.get(group)
+            label = self.ADNI_GROUP_MAPPING.get(group)
             if label is None:
-                continue # Pomiń AD lub inne niepasujące grupy
-            
+                continue
+
             subject = info['subject']
-            desc = info['description'].upper()
-            
-            # Punktacja priorytetu (im niższa tym lepsza)
-            priority = 4 # Default
-            if 'SCALED_2' in desc: priority = 1
-            elif 'SCALED' in desc: priority = 2
-            elif 'N3' in desc: priority = 3
-            
+            visit = info.get('visit', '')
+            description = info['description']
+            sort_key = (
+                self._visit_priority(visit),
+                self._preprocess_priority(description),
+                self._cohort_priority(cohort),
+            )
+
             candidate = {
-                'path': str(img_path),
+                'path': self._relative_data_path(img_path),
                 'original_class': group,
                 'label': label,
                 'class_name': self.CLASS_NAMES[label],
                 'subject': subject,
-                'priority': priority,
-                'description': info['description']
+                'description': description,
+                'visit': visit,
+                'cohort': cohort,
+                'image_id': image_id,
+                '_sort_key': sort_key,
             }
-            
-            if subject not in subject_candidates:
-                subject_candidates[subject] = []
-            subject_candidates[subject].append(candidate)
+            subject_candidates.setdefault(subject, []).append(candidate)
 
-        # Wybierz najlepszego kandydata dla każdego pacjenta
         final_samples = []
-        for subject, candidates in subject_candidates.items():
-            # Sortuj po priorytecie i weź pierwszy
-            best_candidate = sorted(candidates, key=lambda x: x['priority'])[0]
-            final_samples.append(best_candidate)
+        for candidates in subject_candidates.values():
+            best = sorted(candidates, key=lambda x: x['_sort_key'])[0]
+            del best['_sort_key']
+            final_samples.append(best)
 
         df = pd.DataFrame(final_samples)
-        
-        # Usuwamy pomocnicze kolumny jeśli nie są potrzebne
-        if not df.empty and 'priority' in df.columns:
-            df = df.drop(columns=['priority'])
-            
         self._print_stats(df)
         return df
 

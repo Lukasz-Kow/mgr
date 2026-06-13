@@ -219,7 +219,48 @@ def metrics_with_fixed_threshold(
         'accuracy': float(accuracy_score(labels, preds)),
         'precision': float(precision_score(labels, preds, pos_label=positive_class, zero_division=0)),
         'f1': float(f1_score(labels, preds, pos_label=positive_class, zero_division=0)),
+        'fp': int(fp),
+        'fn': int(fn),
+        'tp': int(tp),
+        'tn': int(tn),
     }
+
+
+def compute_val_to_test_metrics_at_specs(
+    val_labels: np.ndarray,
+    val_probs_pos: np.ndarray,
+    test_labels: np.ndarray,
+    test_probs_pos: np.ndarray,
+    target_specificities: List[float],
+    positive_class: int = 1,
+) -> Dict[str, Dict[str, float]]:
+    """
+    Fit probability thresholds on validation, evaluate on test for each specificity.
+
+    Returns dict keyed by ``spec_70``, ``spec_80``, etc.
+    """
+    results = {}
+    for spec in target_specificities:
+        threshold = fit_threshold_at_specificity(
+            val_labels, val_probs_pos, spec, positive_class
+        )
+        key = f"spec_{int(round(spec * 100))}"
+        if not np.isfinite(threshold):
+            results[key] = {
+                'target_specificity': float(spec),
+                'threshold': float('nan'),
+                'sensitivity': 0.0,
+                'actual_specificity': 0.0,
+                'fp': 0,
+                'fn': 0,
+            }
+            continue
+        m = metrics_with_fixed_threshold(
+            test_labels, test_probs_pos, threshold, positive_class
+        )
+        m['target_specificity'] = float(spec)
+        results[key] = m
+    return results
 
 
 def compute_sensitivity_at_multiple_specificities(
@@ -440,7 +481,7 @@ class MetricsTracker:
         self.target_specificity = target_specificity
         self.positive_class = positive_class
         self.abstention_levels = abstention_levels or [0.10, 0.20, 0.30]
-        self.report_specificities = report_specificities or [0.80, 0.90, 1.0]
+        self.report_specificities = report_specificities or [0.70, 0.80, 0.90, 0.95, 1.0]
         self.reset()
     
     def reset(self):

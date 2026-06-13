@@ -6,13 +6,19 @@ preprocessing:
   normalize_method: 'zscore'  # 'zscore', 'minmax', or 'none'
 
 # Augmentation settings (applied only to training set)
+# lightweight aug (flip + intensity + noise; no CPU-heavy geometry)
 augmentation:
   enabled: true
   horizontal_flip: true
-  rotation_range: 5.0   # degrees (reduced for small ADNI subset)
+  flip_probability: 0.5
+  rotation_range: 0
+  shift_3d_range: 0
   random_brightness: 0.05  # +/- 5%
   random_contrast: 0.05    # +/- 5%
-  elastic_deformation: false   # TorchIO elastic deformation (disabled for speed)
+  noise_std: 0.01
+  elastic_deformation: false
+  elastic_num_control_points: 7
+  elastic_max_displacement: 5.0
   bias_field: false             # TorchIO bias field (disabled for speed)
 
 # Dataset splits
@@ -28,9 +34,15 @@ dataloader:
   batch_size: 1  # GTX 1050 / 3D volumes
   num_workers: -1  # Automatic detection
   pin_memory: true
-  balance_classes: true
+  balance_classes: true  # legacy; prefer imbalance_strategy below
+
+# Imbalance strategy: balanced_sampler | natural | cost_sensitive
+imbalance_strategy: balanced_sampler
 
 # Paths
 paths:
   dataset_root: 'Data baseline'
   metadata_csv: 'data_metadata_adni.csv'
+  metadata_baseline_csv: 'Data baseline/metadata/baseline_2026-02-23.csv'
+  metadata_mci_cn_csv: 'Data baseline/metadata/mci_cn_scaled2_2026-06-09.csv'
+  inventory_report: 'Data baseline/metadata/inventory_report.json'

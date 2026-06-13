@@ -166,6 +166,10 @@ class MCIDataModule:
             augmentation_config or {}, 
             is_train=True
         )
+        if self.train_augmentation is not None:
+            print(f"Augmentation: ON — {self.train_augmentation.describe_active_transforms()}")
+        else:
+            print("Augmentation: OFF")
         
         # Datasets (lazy initialization)
         self._train_dataset = None

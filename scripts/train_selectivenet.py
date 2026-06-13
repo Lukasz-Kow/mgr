@@ -32,10 +32,12 @@ from src.training.fine_tune import (
     build_optimizer_param_groups,
     should_count_early_stopping,
 )
+from src.training.imbalance_strategy import add_imbalance_cli_args, apply_train_overrides
 
 def train():
     parser = argparse.ArgumentParser(description='Train SelectiveNet Model')
     parser.add_argument('--config', type=str, default='configs/selectivenet_config.yaml', help='Path to config file')
+    add_imbalance_cli_args(parser)
     args = parser.parse_args()
 
     with open(args.config, 'r') as f:
@@ -43,6 +45,9 @@ def train():
     
     with open('configs/data_config.yaml', 'r') as f:
         data_cfg = yaml.safe_load(f)
+    
+    imbalance = apply_train_overrides(args, data_cfg, config)
+    print(f"Imbalance strategy: {imbalance['imbalance_strategy']}")
     
     eval_cfg = load_evaluation_config()
     target_spec = eval_cfg.get('target_specificity', 0.95)
@@ -58,7 +63,7 @@ def train():
         num_workers=data_cfg['dataloader']['num_workers'],
         augmentation_config=data_cfg,
         cache_dir='cache/selective_net',
-        balance_classes=data_cfg['dataloader'].get('balance_classes', False)
+        balance_classes=imbalance['balance_classes']
     )
 
     train_loader = dm.train_dataloader()
@@ -77,11 +82,17 @@ def train():
         setup_fine_tune_for_epoch(model, config, 1)
         print(f"Fine-tune: encoder frozen for epochs 1–{freeze_epochs}")
 
+    class_weights = None
+    if imbalance['use_class_weights']:
+        class_weights = dm.get_class_weights().to(device)
+        print(f"Using class weights: {class_weights.tolist()}")
+
     criterion = SelectiveNetLoss(
         target_coverage=config['selective_net']['target_coverage'],
         alpha=config['selective_net'].get('alpha', 0.5),
         aux_weight=config['selective_net']['aux_weight'],
-        coverage_penalty=config['selective_net']['coverage_penalty']
+        coverage_penalty=config['selective_net']['coverage_penalty'],
+        class_weights=class_weights,
     )
 
     def _make_optimizer():
@@ -158,6 +169,7 @@ def train():
         # Validation
         model.eval()
         val_loss = 0.0
+        val_sel_probs = []
         tracker = create_metrics_tracker(
             eval_cfg, num_classes=config['model']['classifier']['num_classes']
         )
@@ -169,6 +181,7 @@ def train():
                     pred_logits, selection_probs, aux_logits = model(images, return_selection=True, return_auxiliary=True)
                     loss, _ = criterion(pred_logits, selection_probs, aux_logits, labels)
                 val_loss += loss.item()
+                val_sel_probs.append(selection_probs.cpu().numpy())
                 
                 probs = torch.softmax(pred_logits, dim=1)
                 preds, _, sel_probs, _ = model.predict_with_selection(
@@ -179,9 +192,18 @@ def train():
         avg_val_loss = val_loss / len(val_loader)
         val_metrics = tracker.compute_all_metrics()
         val_metrics['loss'] = avg_val_loss
+
+        val_sel_all = np.concatenate(val_sel_probs)
+        sel_mean = float(val_sel_all.mean())
+        sel_std = float(val_sel_all.std())
+        hard_coverage = float((val_sel_all > selection_threshold).mean())
         
         print(f"Epoch {epoch+1}: Val Loss={avg_val_loss:.4f}, Val Acc={val_metrics['accuracy']:.4f}")
         print(f"         {format_validation_log(val_metrics, target_spec)}")
+        print(
+            f"         Selection: mean={sel_mean:.4f}, std={sel_std:.4f}, "
+            f"hard_cov@{selection_threshold}={hard_coverage:.4f}"
+        )
 
         scheduler.step(avg_val_loss)
 

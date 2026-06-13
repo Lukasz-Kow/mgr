@@ -1,4 +1,4 @@
-# Hybrid 3D-ResNet-EDL Configuration (Phase 2: MONAI + MedicalNet)
+# Hybrid 3D-ResNet-EDL Configuration (MONAI + MedicalNet)
 
 model:
   backbone:
@@ -31,6 +31,7 @@ training:
   learning_rate: 0.0001
   weight_decay: 0.001
   warmup_epochs: 8
+  validate_every_n: 2
 
   optimizer: 'adamw'
 
@@ -41,21 +42,21 @@ training:
 
   early_stopping:
     enabled: true
-    patience: 30
-    metric: 'val_sensitivity_at_target_spec'
+    patience: 15
+    metric: 'val_composite'
     mode: 'max'
 
 data:
   metadata_csv: 'data_metadata_adni.csv'
 
 checkpoint:
-  dir: 'checkpoints/hybrid_monai'
+  dir: 'checkpoints/hybrid'
   save_best_only: true
-  monitor: 'val_sensitivity_at_target_spec'
+  monitor: 'val_composite'
   mode: 'max'
 
 logging:
-  tensorboard_dir: 'runs/hybrid_monai'
+  tensorboard_dir: 'runs/hybrid'
   log_interval: 10
   save_predictions: true
 

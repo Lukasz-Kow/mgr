@@ -25,24 +25,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.data.preprocessing import MRIPreprocessor
-from src.models.backbone import get_backbone, ResNetBackbone2D
+from src.models.backbone import get_backbone
 from src.models.baseline_softmax import BaselineSoftmaxModel
 from src.models.selective_net import SelectiveNet
 from src.models.hybrid_model import HybridEvidentialModel
-from src.models.evidential_layer import EvidentialLayer, compute_uncertainty
-import torch.nn as nn
-
-
-# EDLModel – identyczny jak w train_evidential.py
-class EDLModel(nn.Module):
-    def __init__(self, backbone, num_classes=2):
-        super().__init__()
-        self.backbone = backbone
-        self.evidential_head = EvidentialLayer(backbone.feature_dim, num_classes)
-
-    def forward(self, x):
-        features = self.backbone(x)
-        return self.evidential_head(features)
+from src.models.edl_model import EDLModel
+from src.models.evidential_layer import compute_uncertainty
 
 
 # ── Stałe ────────────────────────────────────────────────────────────────────
@@ -99,21 +87,15 @@ def load_model_for_inference(model_key: str, device: torch.device):
         )
 
     # Buduj model – architektura musi odpowiadać treningowi!
+    backbone = get_backbone(cfg['model']['backbone'], force_3d=True)
+
     if m_info['type'] == 'baseline':
-        backbone = ResNetBackbone2D(
-            arch=cfg['model']['backbone'].get('arch_2d', 'resnet18'),
-            pretrained=False,
-            in_channels=cfg['model']['backbone'].get('in_channels', 1)
-        )
         model = BaselineSoftmaxModel(backbone, num_classes=2).to(device)
     elif m_info['type'] == 'selectivenet':
-        backbone = get_backbone(cfg['model']['backbone'], force_3d=True)
         model = SelectiveNet(backbone, num_classes=2).to(device)
     elif m_info['type'] == 'evidential':
-        backbone = get_backbone(cfg['model']['backbone'], force_3d=True)
         model = EDLModel(backbone, num_classes=2).to(device)
     elif m_info['type'] == 'hybrid':
-        backbone = get_backbone(cfg['model']['backbone'], force_3d=True)
         model = HybridEvidentialModel(backbone, num_classes=2).to(device)
 
     checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)

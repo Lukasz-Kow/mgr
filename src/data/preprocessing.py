@@ -8,6 +8,8 @@ When migrating to 3D ADNI data (NIfTI), update:
 - Add skull stripping if needed
 """
 
+import warnings
+
 import numpy as np
 from PIL import Image
 from typing import Tuple, Optional
@@ -168,32 +170,41 @@ class AugmentationPipeline:
     def __init__(
         self,
         horizontal_flip: bool = True,
+        flip_probability: float = 0.5,
         rotation_range: float = 10.0,  # degrees
         random_brightness: float = 0.1,
         random_contrast: float = 0.1,
         shift_3d_range: float = 5.0,   # pixels
         noise_std: float = 0.01,       # std of gaussian noise
         elastic_deformation: bool = False,  # TorchIO elastic deformation
+        elastic_num_control_points: int = 7,
+        elastic_max_displacement: float = 5.0,
         bias_field: bool = False            # TorchIO bias field simulation
     ):
         """
         Args:
             horizontal_flip: Czy stosować horizontal flip
+            flip_probability: Prawdopodobieństwo flipa (0.0–1.0)
             rotation_range: Zakres rotacji w stopniach (+/-) na każdą z 3 osi
             random_brightness: Zakres zmiany jasności
             random_contrast: Zakres zmiany kontrastu
             shift_3d_range: Zakres przesunięcia w pikselach (+/-)
             noise_std: Odchylenie standardowe szumu Gaussa
             elastic_deformation: Czy stosować elastyczną deformację (TorchIO)
+            elastic_num_control_points: Liczba punktów kontrolnych TorchIO
+            elastic_max_displacement: Maks. przesunięcie TorchIO (piksele)
             bias_field: Czy symulować niejednorodność pola B1 skanera (TorchIO)
         """
         self.horizontal_flip = horizontal_flip
+        self.flip_probability = flip_probability
         self.rotation_range = rotation_range
         self.random_brightness = random_brightness
         self.random_contrast = random_contrast
         self.shift_3d_range = shift_3d_range
         self.noise_std = noise_std
         self.elastic_deformation = elastic_deformation
+        self.elastic_num_control_points = elastic_num_control_points
+        self.elastic_max_displacement = elastic_max_displacement
         self.bias_field = bias_field
 
     def _random_3d_rotation(self, tensor: torch.Tensor) -> torch.Tensor:
@@ -230,6 +241,56 @@ class AugmentationPipeline:
             return tensor + noise
         return tensor
 
+    def _random_brightness_contrast(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Losowa zmiana jasności i kontrastu (działa na danych z-score)."""
+        if self.random_brightness > 0:
+            delta = (torch.rand(1).item() * 2 - 1) * self.random_brightness
+            tensor = tensor + delta
+        if self.random_contrast > 0:
+            factor = 1.0 + (torch.rand(1).item() * 2 - 1) * self.random_contrast
+            mean = tensor.mean()
+            tensor = (tensor - mean) * factor + mean
+        return tensor
+
+    def _apply_torchio_transform(self, tensor: torch.Tensor, transform_factory) -> torch.Tensor:
+        """Aplikuje transformację TorchIO z ostrzeżeniem gdy biblioteka brakuje."""
+        try:
+            import torchio as tio
+        except ImportError:
+            warnings.warn(
+                "TorchIO is not installed; skipping TorchIO augmentation transform.",
+                stacklevel=2,
+            )
+            return tensor
+
+        transform = transform_factory(tio)
+        subject = tio.Subject(image=tio.ScalarImage(tensor=tensor))
+        return transform(subject).image.data
+
+    def describe_active_transforms(self) -> str:
+        """Zwraca krótki opis aktywnych transformacji do logowania."""
+        parts = []
+        if self.rotation_range > 0:
+            parts.append(f"rotation±{self.rotation_range}°")
+        if self.shift_3d_range > 0:
+            parts.append(f"shift±{self.shift_3d_range}px")
+        if self.horizontal_flip and self.flip_probability > 0:
+            parts.append(f"flip p={self.flip_probability}")
+        if self.random_brightness > 0:
+            parts.append(f"brightness±{self.random_brightness}")
+        if self.random_contrast > 0:
+            parts.append(f"contrast±{self.random_contrast}")
+        if self.elastic_deformation:
+            parts.append(
+                f"elastic(cp={self.elastic_num_control_points}, "
+                f"disp={self.elastic_max_displacement})"
+            )
+        if self.bias_field:
+            parts.append("bias_field")
+        if self.noise_std > 0:
+            parts.append(f"noise std={self.noise_std}")
+        return ", ".join(parts) if parts else "none"
+
     def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
         """
         Aplikuje intensywne augmentacje 3D dla ADNI lub 2D dla Kaggle.
@@ -254,36 +315,29 @@ class AugmentationPipeline:
                 tensor = self._random_3d_shift(tensor)
                 
             # 3. Horizontal Flip (anatomical left-right)
-            if self.horizontal_flip and torch.rand(1).item() > 0.5:
+            if self.horizontal_flip and torch.rand(1).item() < self.flip_probability:
                 tensor = torch.flip(tensor, dims=[-1])
             
             # 4. TorchIO: Elastic Deformation (symuluje zmienność anatomiczną)
             if self.elastic_deformation:
-                try:
-                    import torchio as tio
-                    # TorchIO wymaga 4D: (C, D, H, W) — tensor już jest w tym formacie
-                    subject = tio.Subject(image=tio.ScalarImage(tensor=tensor))
-                    transform = tio.RandomElasticDeformation(
-                        num_control_points=7,
-                        max_displacement=7.5,
-                    )
-                    tensor = transform(subject).image.data
-                except ImportError:
-                    pass  # TorchIO not installed, skip
+                tensor = self._apply_torchio_transform(
+                    tensor,
+                    lambda tio: tio.RandomElasticDeformation(
+                        num_control_points=self.elastic_num_control_points,
+                        max_displacement=self.elastic_max_displacement,
+                    ),
+                )
             
             # 5. TorchIO: Bias Field (symuluje artefakty pola B1 skanera)
             if self.bias_field:
-                try:
-                    import torchio as tio
-                    subject = tio.Subject(image=tio.ScalarImage(tensor=tensor))
-                    transform = tio.RandomBiasField(coefficients=0.5)
-                    tensor = transform(subject).image.data
-                except ImportError:
-                    pass  # TorchIO not installed, skip
+                tensor = self._apply_torchio_transform(
+                    tensor,
+                    lambda tio: tio.RandomBiasField(coefficients=0.5),
+                )
                 
         else:
             # --- AUGMENTACJE 2D (Kaggle) ---
-            if self.horizontal_flip and torch.rand(1).item() > 0.5:
+            if self.horizontal_flip and torch.rand(1).item() < self.flip_probability:
                 tensor = torch.flip(tensor, dims=[-1])
             
             if self.rotation_range > 0:
@@ -292,6 +346,9 @@ class AugmentationPipeline:
                 tensor = TF.rotate(tensor, angle, fill=0.0)
         
         # --- AUGMENTACJE WSPÓLNE (Intensywność / Szum) ---
+
+        if self.random_brightness > 0 or self.random_contrast > 0:
+            tensor = self._random_brightness_contrast(tensor)
         
         # 6. Szum Gaussa (kluczowy dla robustness EDL)
         if self.noise_std > 0:
@@ -341,11 +398,14 @@ def get_augmentation(config: dict, is_train: bool = True) -> Optional[Augmentati
     
     return AugmentationPipeline(
         horizontal_flip=aug_config.get('horizontal_flip', True),
+        flip_probability=aug_config.get('flip_probability', 0.5),
         rotation_range=aug_config.get('rotation_range', 10.0),
         random_brightness=aug_config.get('random_brightness', 0.1),
         random_contrast=aug_config.get('random_contrast', 0.1),
         shift_3d_range=aug_config.get('shift_3d_range', 5.0),
         noise_std=aug_config.get('noise_std', 0.01),
         elastic_deformation=aug_config.get('elastic_deformation', False),
-        bias_field=aug_config.get('bias_field', False)
+        elastic_num_control_points=aug_config.get('elastic_num_control_points', 7),
+        elastic_max_displacement=aug_config.get('elastic_max_displacement', 5.0),
+        bias_field=aug_config.get('bias_field', False),
     )

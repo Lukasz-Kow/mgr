@@ -8,8 +8,6 @@ import sys
 
 import csv
 
-import argparse
-
 from pathlib import Path
 
 
@@ -26,25 +24,11 @@ from src.training.eval_utils import load_evaluation_config
 
 
 
-CHECKPOINTS_PHASE1 = {
-
-    'Baseline': 'checkpoints/baseline/best_model.pth',
-
+CHECKPOINTS = {
+    'Baseline (SR)': 'checkpoints/baseline/best_model.pth',
     'SelectiveNet': 'checkpoints/selective_net/best_model.pt',
-
     'Evidential (EDL)': 'checkpoints/evidential/best_model.pt',
-
     'Hybrid (3D-ResNet-EDL)': 'checkpoints/hybrid/best_model.pt',
-
-}
-
-
-
-CHECKPOINTS_PHASE2 = {
-    'Baseline (MONAI)': 'checkpoints/baseline_monai/best_model.pth',
-    'SelectiveNet (MONAI)': 'checkpoints/selective_net_monai/best_model.pt',
-    'Evidential (MONAI)': 'checkpoints/evidential_monai/best_model.pt',
-    'Hybrid (MONAI)': 'checkpoints/hybrid_monai/best_model.pt',
 }
 
 
@@ -61,11 +45,8 @@ def _backbone_from_ckpt(ckpt) -> str:
 
     bb = cfg.get('model', {}).get('backbone', {})
 
-    if bb.get('type') == 'monai':
-
-        return f"MONAI+{bb.get('pretrained', 'medicalnet')}"
-
-    return 'simple CNN'
+    pre = bb.get('pretrained', 'medicalnet')
+    return f"MONAI+{pre}" if pre else "MONAI"
 
 
 
@@ -171,41 +152,19 @@ def summarize_checkpoints(checkpoints: dict, target_spec: float) -> list:
 
 def main():
 
-    parser = argparse.ArgumentParser(description='Training summary from checkpoints')
-
-    parser.add_argument('--phase2', action='store_true', help='Include Phase 2 MONAI checkpoints')
-
-    args = parser.parse_args()
-
-
-
     eval_cfg = load_evaluation_config()
 
     target_spec = eval_cfg.get('target_specificity', 0.80)
-
-
 
     rows = []
 
     print("=" * 90)
 
-    print(f"  TRAINING SUMMARY Phase 1 (Sens@{target_spec:.0%}Spec on validation)")
+    print(f"  TRAINING SUMMARY — MONAI (Sens@{target_spec:.0%}Spec on validation)")
 
     print("=" * 90)
 
-    rows.extend(summarize_checkpoints(CHECKPOINTS_PHASE1, target_spec))
-
-
-
-    if args.phase2:
-
-        print("\n" + "=" * 90)
-
-        print(f"  TRAINING SUMMARY Phase 2 — MONAI (Sens@{target_spec:.0%}Spec on validation)")
-
-        print("=" * 90)
-
-        rows.extend(summarize_checkpoints(CHECKPOINTS_PHASE2, target_spec))
+    rows.extend(summarize_checkpoints(CHECKPOINTS, target_spec))
 
 
 

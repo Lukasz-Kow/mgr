@@ -29,78 +29,64 @@ from src.models.backbone import get_backbone
 from src.models.baseline_softmax import BaselineSoftmaxModel
 from src.models.selective_net import SelectiveNet
 from src.models.hybrid_model import HybridEvidentialModel
-from src.models.evidential_layer import EvidentialLayer, compute_uncertainty
+from src.models.edl_model import EDLModel
+from src.models.evidential_layer import compute_uncertainty
 
 
-# Lightweight EDL container (same as in train_evidential.py)
-class EDLModel(torch.nn.Module):
-    def __init__(self, backbone, num_classes=2):
-        super().__init__()
-        self.backbone = backbone
-        self.evidential_head = EvidentialLayer(backbone.feature_dim, num_classes)
-    
-    def forward(self, x):
-        features = self.backbone(x)
-        return self.evidential_head(features)
+CHECKPOINTS = {
+    'Baseline': ('configs/baseline_config.yaml', 'checkpoints/baseline/best_model.pth'),
+    'SelectiveNet': ('configs/selectivenet_config.yaml', 'checkpoints/selective_net/best_model.pt'),
+    'EDL': ('configs/evidential_config.yaml', 'checkpoints/evidential/best_model.pt'),
+    'Hybrid': ('configs/hybrid_config.yaml', 'checkpoints/hybrid/best_model.pt'),
+}
+
+
+def _build_model(name, cfg, device):
+    backbone = get_backbone(cfg['model']['backbone'], force_3d=True)
+    if name == 'Baseline':
+        model = BaselineSoftmaxModel(
+            backbone=backbone,
+            num_classes=cfg['model']['classifier']['num_classes'],
+            dropout=cfg['model']['classifier']['dropout'],
+        )
+        model_type = 'softmax'
+    elif name == 'SelectiveNet':
+        model = SelectiveNet(
+            backbone=backbone,
+            num_classes=cfg['model']['classifier']['num_classes'],
+            dropout=cfg['model']['classifier']['dropout'],
+            selection_dropout=cfg['model']['classifier']['selection_dropout'],
+        )
+        model_type = 'selective'
+    elif name == 'EDL':
+        model = EDLModel(backbone, num_classes=cfg['model']['classifier']['num_classes'])
+        model_type = 'evidential'
+    else:
+        model = HybridEvidentialModel(
+            backbone=backbone,
+            num_classes=cfg['model']['classifier']['num_classes'],
+            dropout=cfg['model']['classifier']['dropout'],
+        )
+        model_type = 'evidential'
+    return model, model_type
 
 
 def load_all_models(device='cpu'):
     """Load all 4 trained models."""
     models = {}
-    
-    # --- Baseline ---
-    with open('configs/baseline_config.yaml') as f:
-        cfg = yaml.safe_load(f)
-    backbone = get_backbone(cfg['model']['backbone'], force_3d=True)
-    model = BaselineSoftmaxModel(
-        backbone=backbone,
-        num_classes=cfg['model']['classifier']['num_classes'],
-        dropout=cfg['model']['classifier']['dropout']
-    )
-    ckpt = torch.load('checkpoints/baseline/best_model.pth', map_location=device, weights_only=False)
-    model.load_state_dict(ckpt['model_state_dict'])
-    model.eval().to(device)
-    models['Baseline'] = {'model': model, 'type': 'softmax', 'config': cfg}
-    
-    # --- SelectiveNet ---
-    with open('configs/selectivenet_config.yaml') as f:
-        cfg = yaml.safe_load(f)
-    backbone = get_backbone(cfg['model']['backbone'], force_3d=True)
-    model = SelectiveNet(
-        backbone=backbone,
-        num_classes=cfg['model']['classifier']['num_classes'],
-        dropout=cfg['model']['classifier']['dropout'],
-        selection_dropout=cfg['model']['classifier']['selection_dropout']
-    )
-    ckpt = torch.load('checkpoints/selective_net/best_model.pt', map_location=device, weights_only=False)
-    model.load_state_dict(ckpt['model_state_dict'])
-    model.eval().to(device)
-    models['SelectiveNet'] = {'model': model, 'type': 'selective', 'config': cfg}
-    
-    # --- EDL ---
-    with open('configs/evidential_config.yaml') as f:
-        cfg = yaml.safe_load(f)
-    backbone = get_backbone(cfg['model']['backbone'], force_3d=True)
-    model = EDLModel(backbone, num_classes=cfg['model']['classifier']['num_classes'])
-    ckpt = torch.load('checkpoints/evidential/best_model.pt', map_location=device, weights_only=False)
-    model.load_state_dict(ckpt['model_state_dict'])
-    model.eval().to(device)
-    models['EDL'] = {'model': model, 'type': 'evidential', 'config': cfg}
-    
-    # --- Hybrid ---
-    with open('configs/hybrid_config.yaml') as f:
-        cfg = yaml.safe_load(f)
-    backbone = get_backbone(cfg['model']['backbone'], force_3d=True)
-    model = HybridEvidentialModel(
-        backbone=backbone,
-        num_classes=cfg['model']['classifier']['num_classes'],
-        dropout=cfg['model']['classifier']['dropout']
-    )
-    ckpt = torch.load('checkpoints/hybrid/best_model.pt', map_location=device, weights_only=False)
-    model.load_state_dict(ckpt['model_state_dict'])
-    model.eval().to(device)
-    models['Hybrid'] = {'model': model, 'type': 'evidential', 'config': cfg}
-    
+
+    for name, (config_path, ckpt_path) in CHECKPOINTS.items():
+        if not Path(ckpt_path).exists():
+            print(f"  Skipping {name}: checkpoint not found at {ckpt_path}")
+            continue
+        with open(config_path) as f:
+            cfg = yaml.safe_load(f)
+        model, model_type = _build_model(name, cfg, device)
+        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt['model_state_dict'])
+        model.eval().to(device)
+        models[name] = {'model': model, 'type': model_type, 'config': cfg}
+
     return models
 
 

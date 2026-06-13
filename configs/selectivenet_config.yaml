@@ -1,4 +1,4 @@
-# SelectiveNet Configuration (Phase 2: MONAI ResNet3D-10 + MedicalNet)
+# SelectiveNet Configuration (MONAI ResNet3D-10 + MedicalNet)
 
 model:
   backbone:
@@ -12,20 +12,20 @@ model:
 
   classifier:
     dropout: 0.6
-    selection_dropout: 0.3
+    selection_dropout: 0.0
     num_classes: 2
 
   fine_tune:
-    freeze_encoder_epochs: 3
+    freeze_encoder_epochs: 5
     encoder_lr: 0.00001
     head_lr: 0.0001
 
 selective_net:
-  target_coverage: 0.65
+  target_coverage: 0.80
   selection_threshold: 0.35
   alpha: 0.7
   aux_weight: 0.3
-  coverage_penalty: 5.0
+  coverage_penalty: 10.0
 
 training:
   epochs: 120
@@ -33,6 +33,7 @@ training:
   learning_rate: 0.0001
   weight_decay: 0.001
   warmup_epochs: 8
+  validate_every_n: 2
 
   optimizer: 'adam'
 
@@ -44,21 +45,21 @@ training:
 
   early_stopping:
     enabled: true
-    patience: 30
-    metric: 'val_sensitivity_at_target_spec'
+    patience: 15
+    metric: 'val_composite'
     mode: 'max'
 
 data:
   metadata_csv: 'data_metadata_adni.csv'
 
 checkpoint:
-  dir: 'checkpoints/selective_net_monai'
+  dir: 'checkpoints/selective_net'
   save_best_only: true
-  monitor: 'val_sensitivity_at_target_spec'
+  monitor: 'val_composite'
   mode: 'max'
 
 logging:
-  tensorboard_dir: 'runs/selective_net_monai'
+  tensorboard_dir: 'runs/selective_net'
   log_interval: 10
   save_predictions: true
 

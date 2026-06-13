@@ -38,6 +38,7 @@ from src.training.fine_tune import (
     build_optimizer_param_groups,
     should_count_early_stopping,
 )
+from src.training.imbalance_strategy import add_imbalance_cli_args, apply_train_overrides
 
 
 def load_config(config_path: str) -> dict:
@@ -148,11 +149,13 @@ def main():
         default='configs/data_config.yaml',
         help='Path to data config file'
     )
+    add_imbalance_cli_args(parser)
     args = parser.parse_args()
     
     # Load configs
     config = load_config(args.config)
     data_config = load_config(args.data_config)
+    imbalance = apply_train_overrides(args, data_config, config)
     
     eval_cfg = load_evaluation_config()
     target_spec = eval_cfg.get('target_specificity', 0.95)
@@ -166,6 +169,7 @@ def main():
     print("="*60)
     print(f"Device: {device}")
     print(f"Config: {args.config}")
+    print(f"Imbalance strategy: {imbalance['imbalance_strategy']}")
     print("="*60)
     
     # Create data module
@@ -177,7 +181,7 @@ def main():
         num_workers=data_config['dataloader']['num_workers'],
         augmentation_config=data_config,
         cache_dir='cache/baseline',
-        balance_classes=data_config['dataloader'].get('balance_classes', False)
+        balance_classes=imbalance['balance_classes']
     )
     
     train_loader = data_module.train_dataloader()
@@ -205,7 +209,7 @@ def main():
         print(f"Fine-tune: encoder frozen for epochs 1–{freeze_epochs}")
 
     # Loss function
-    if config['training']['use_class_weights']:
+    if imbalance['use_class_weights']:
         class_weights = data_module.get_class_weights().to(device)
         criterion = nn.CrossEntropyLoss(weight=class_weights)
         print(f"Using class weights: {class_weights.tolist()}")

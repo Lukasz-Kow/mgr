@@ -50,8 +50,7 @@ class SelectiveNet(nn.Module):
         self.pred_dropout = nn.Dropout(dropout)
         self.pred_head = nn.Linear(self.feature_dim, num_classes)
         
-        # Selection head (g) - single neuron with sigmoid
-        self.select_dropout = nn.Dropout(selection_dropout)
+        # Selection head (g) - single neuron with sigmoid (no dropout: train/eval consistency)
         self.select_head = nn.Sequential(
             nn.Linear(self.feature_dim, 1),
             nn.Sigmoid()
@@ -90,9 +89,7 @@ class SelectiveNet(nn.Module):
         
         # Selection head
         if return_selection:
-            selection_probs = self.select_head(
-                self.select_dropout(features)
-            ).squeeze(-1)  # (B,)
+            selection_probs = self.select_head(features).squeeze(-1)  # (B,)
             outputs.append(selection_probs)
         
         # Auxiliary head
@@ -148,7 +145,7 @@ class SelectiveNetLoss(nn.Module):
     L = L_selective + λ * L_auxiliary
     
     L_selective = (1/c) * Σ g(x) * CE(f(x), y)
-    where c = (1/n) * Σ g(x) is the coverage (must satisfy c >= target_coverage)
+    where c = (1/n) * Σ g(x) is the coverage (penalized symmetrically around target_coverage)
     
     L_auxiliary = CE(h(x), y)
     """
@@ -158,7 +155,8 @@ class SelectiveNetLoss(nn.Module):
         target_coverage: float = 0.8,
         alpha: float = 0.5,
         aux_weight: float = 0.3,
-        coverage_penalty: float = 10.0
+        coverage_penalty: float = 10.0,
+        class_weights: Optional[torch.Tensor] = None,
     ):
         """
         Args:
@@ -166,6 +164,7 @@ class SelectiveNetLoss(nn.Module):
             alpha: Weight for classification loss (higher = prioritize accuracy)
             aux_weight: Weight for auxiliary loss
             coverage_penalty: Penalty for not meeting target coverage
+            class_weights: Optional CE class weights (cost-sensitive)
         """
         super().__init__()
         
@@ -174,7 +173,8 @@ class SelectiveNetLoss(nn.Module):
         self.aux_weight = aux_weight
         self.coverage_penalty = coverage_penalty
         
-        self.ce_loss = nn.CrossEntropyLoss(reduction='none')
+        self.ce_loss = nn.CrossEntropyLoss(reduction='none', weight=class_weights)
+        self.aux_ce_loss = nn.CrossEntropyLoss(reduction='mean', weight=class_weights)
     
     def forward(
         self,
@@ -204,19 +204,21 @@ class SelectiveNetLoss(nn.Module):
         # Coverage constraint
         coverage = selection_probs.mean()  # Empirical coverage
         
-        # Selective loss: normalize by coverage
-        # This encourages the model to be confident when it selects
-        if coverage > 0:
-            selective_loss = (selection_probs * pred_ce).sum() / (coverage * batch_size)
+        # Selective loss: normalize by effective coverage (prevents g→1 gaming)
+        effective_cov = torch.clamp(coverage, min=self.target_coverage)
+        if effective_cov > 0:
+            selective_loss = (selection_probs * pred_ce).sum() / (
+                effective_cov.detach() * batch_size
+            )
         else:
             selective_loss = pred_ce.mean()
         
-        # Coverage penalty if below target
-        coverage_gap = max(0, self.target_coverage - coverage.item())
-        coverage_loss = self.coverage_penalty * coverage_gap ** 2
+        # Symmetric coverage penalty: target coverage, not just lower bound
+        cov_dev = coverage - self.target_coverage
+        coverage_loss = self.coverage_penalty * cov_dev ** 2
         
         # Auxiliary loss (standard CE on auxiliary head)
-        aux_loss = self.ce_loss(aux_logits, labels).mean()
+        aux_loss = self.aux_ce_loss(aux_logits, labels)
         
         # Total loss (alpha weights classification vs selection)
         total_loss = self.alpha * selective_loss + coverage_loss + self.aux_weight * aux_loss
@@ -224,9 +226,10 @@ class SelectiveNetLoss(nn.Module):
         # Metrics for monitoring
         metrics = {
             'selective_loss': selective_loss.item(),
-            'coverage_loss': coverage_loss,
+            'coverage_loss': coverage_loss.item(),
             'aux_loss': aux_loss.item(),
             'coverage': coverage.item(),
+            'coverage_deviation': cov_dev.item(),
             'target_coverage': self.target_coverage
         }
         
@@ -237,14 +240,15 @@ if __name__ == '__main__':
     # Test SelectiveNet
     print("Testing SelectiveNet...")
     
-    from backbone import ResNetBackbone2D
-    
-    backbone = ResNetBackbone2D(arch='resnet18', pretrained=False)
+    from backbone import get_backbone
+
+    backbone = get_backbone({
+        'type': 'monai', 'use_3d': True, 'arch_3d': 'resnet10', 'pretrained': False,
+    })
     model = SelectiveNet(backbone, num_classes=2)
     
-    # Dummy input
-    x = torch.randn(8, 1, 224, 224)
-    labels = torch.randint(0, 2, (8,))
+    x = torch.randn(2, 1, 64, 64, 64)
+    labels = torch.randint(0, 2, (2,))
     
     # Forward pass
     pred_logits, selection_probs, aux_logits = model(

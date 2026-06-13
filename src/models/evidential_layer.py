@@ -17,7 +17,7 @@ Uncertainty decomposition:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple, Dict
+from typing import Dict, Optional, Tuple
 
 
 class EvidentialLayer(nn.Module):
@@ -109,7 +109,8 @@ class EvidentialLoss(nn.Module):
         num_classes: int = 2,
         kl_weight: float = 1.0,
         kl_anneal_start: int = 0,
-        kl_anneal_end: int = 20
+        kl_anneal_end: int = 20,
+        class_weights: Optional[torch.Tensor] = None,
     ):
         """
         Args:
@@ -117,6 +118,7 @@ class EvidentialLoss(nn.Module):
             kl_weight: Max weight for KL divergence term (reached after annealing)
             kl_anneal_start: Epoch to start annealing KL weight
             kl_anneal_end: Epoch to reach full KL weight
+            class_weights: Optional per-class weights for Bayes risk (cost-sensitive)
         """
         super().__init__()
         
@@ -124,6 +126,10 @@ class EvidentialLoss(nn.Module):
         self.kl_weight = kl_weight
         self.kl_anneal_start = kl_anneal_start
         self.kl_anneal_end = kl_anneal_end
+        if class_weights is not None:
+            self.register_buffer("class_weights", class_weights)
+        else:
+            self.class_weights = None
         
         self.current_epoch = 0
     
@@ -172,7 +178,12 @@ class EvidentialLoss(nn.Module):
             dim=1
         )
         
-        bayes_loss = (mse_loss + variance).mean()
+        per_sample_loss = mse_loss + variance
+        if self.class_weights is not None:
+            sample_w = self.class_weights[labels]
+            bayes_loss = (sample_w * per_sample_loss).mean()
+        else:
+            bayes_loss = per_sample_loss.mean()
         
         # === KL DIVERGENCE REGULARIZATION ===
         # KL(Dir(α̃) || Dir(1)) where α̃ removes evidence for correct class

@@ -200,13 +200,14 @@ if __name__ == '__main__':
     # Test baseline model
     print("Testing Baseline Softmax Model...")
     
-    from backbone import ResNetBackbone2D
-    
-    backbone = ResNetBackbone2D(arch='resnet18', pretrained=False)
+    from backbone import get_backbone
+
+    backbone = get_backbone({
+        'type': 'monai', 'use_3d': True, 'arch_3d': 'resnet10', 'pretrained': False,
+    })
     model = BaselineSoftmaxModel(backbone, num_classes=2)
-    
-    # Dummy input
-    x = torch.randn(4, 1, 224, 224)
+
+    x = torch.randn(2, 1, 64, 64, 64)
     
     # Forward pass
     logits = model(x)

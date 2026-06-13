@@ -150,18 +150,74 @@ class HybridEvidentialModel(nn.Module):
         
         return predictions_with_rejection, probabilities, uncertainties, is_abstained
 
+    @staticmethod
+    def composite_abstention_score(
+        epistemic_unc: torch.Tensor,
+        strength: torch.Tensor,
+        strength_min: float = 2.0,
+    ) -> torch.Tensor:
+        """Higher score = more confident; combines uncertainty and evidence strength."""
+        strength_factor = torch.clamp(strength / strength_min, max=1.0)
+        return (1.0 - epistemic_unc) * strength_factor
+
+    @torch.no_grad()
+    def predict_with_dual_gate(
+        self,
+        x: torch.Tensor,
+        prob_threshold: float,
+        uncertainty_threshold: float = 0.5,
+        strength_min: float = 2.0,
+        uncertainty_type: str = 'epistemic',
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Dual-gate prediction: Spec threshold (Gate 1) + uncertainty abstention (Gate 2).
+
+        Gate 1: prob_MCI < prob_threshold → CN (controls FP)
+        Gate 2: high uncertainty or low evidence strength → abstain
+        """
+        self.eval()
+        alpha = self.forward(x)
+        strength = alpha.sum(dim=1)
+        probabilities = alpha / strength.unsqueeze(1)
+        prob_mci = probabilities[:, 1]
+
+        if uncertainty_type == 'aleatoric':
+            _, aleatoric_unc, _ = compute_uncertainty(alpha)
+            uncertainties = aleatoric_unc
+        elif uncertainty_type == 'total':
+            _, _, total_unc = compute_uncertainty(alpha)
+            uncertainties = total_unc
+        else:
+            epistemic_unc, _, _ = compute_uncertainty(alpha)
+            uncertainties = epistemic_unc
+
+        predictions = torch.zeros(len(prob_mci), dtype=torch.long, device=x.device)
+        is_abstained = torch.zeros(len(prob_mci), dtype=torch.bool, device=x.device)
+
+        mci_candidate = prob_mci >= prob_threshold
+        low_strength = strength < strength_min
+        high_unc = uncertainties > uncertainty_threshold
+
+        predictions[mci_candidate] = 1
+        abstain_mask = mci_candidate & (high_unc | low_strength)
+        is_abstained[abstain_mask] = True
+        predictions[is_abstained] = -1
+
+        return predictions, probabilities, uncertainties, is_abstained
+
 
 if __name__ == '__main__':
     # Test hybrid model
     print("Testing Hybrid Evidential Model...")
     
-    from backbone import ResNetBackbone2D
-    
-    backbone = ResNetBackbone2D(arch='resnet18', pretrained=False)
+    from backbone import get_backbone
+
+    backbone = get_backbone({
+        'type': 'monai', 'use_3d': True, 'arch_3d': 'resnet10', 'pretrained': False,
+    })
     model = HybridEvidentialModel(backbone, num_classes=2)
-    
-    # Dummy input
-    x = torch.randn(4, 1, 224, 224)
+
+    x = torch.randn(2, 1, 64, 64, 64)
     
     # Forward pass
     alpha = model(x)
